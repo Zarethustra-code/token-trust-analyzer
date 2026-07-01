@@ -20,6 +20,15 @@ def _fake_collector(raw: dict):
     return _FakeCollector
 
 
+# --- /ui -------------------------------------------------------------------- #
+def test_ui_serves_html(client):
+    resp = client.get("/ui")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Token Trust Analyzer" in resp.text
+    assert "/analyze" in resp.text  # the page calls the analyze endpoint
+
+
 # --- /health ---------------------------------------------------------------- #
 def test_health_ok(client):
     resp = client.get("/health")

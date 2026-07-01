@@ -165,9 +165,19 @@ python app.py
 # or: uvicorn app:app --reload
 ```
 
+- **http://localhost:8000/ui** — the **web dashboard** (paste an address → visual Trust Report)
 - **http://localhost:8000/docs** — Swagger UI
 
 The Isolation Forest trains (or loads) on startup, so the first request is fast.
+
+### Web UI
+
+A dependency-free, single-file dashboard ([`web/index.html`](web/index.html),
+served at **`/ui`**) for demoing the analyzer: enter a token address, pick the
+chain, and see a color-coded risk gauge, the confidence/data-completeness line,
+flags, key metrics, the explainable score breakdown, and the AI-content check —
+all rendered from the same-origin `POST /analyze` response (no keys, no
+third-party frontend calls).
 
 ---
 

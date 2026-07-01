@@ -18,7 +18,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from cap.cap_wrapper import simulate_cap_cycle
 from collectors.onchain_collector import OnChainCollector
@@ -177,6 +177,15 @@ app = FastAPI(
     description="Explainable ERC-20 token trust scoring (rules + Isolation Forest).",
     lifespan=lifespan,
 )
+
+
+_WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+
+
+@app.get("/ui", include_in_schema=False)
+async def ui() -> FileResponse:
+    """Serve the single-page demo frontend (talks to /analyze on the same origin)."""
+    return FileResponse(os.path.join(_WEB_DIR, "index.html"), media_type="text/html")
 
 
 @app.get("/health")
