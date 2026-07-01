@@ -195,11 +195,29 @@ third-party frontend calls).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/analyze` | Full pipeline: collect → features → score → (AI detect) → report |
+| `POST` | `/analyze` | Full pipeline: collect → features → score → (AI detect) → report (with a `cached` flag) |
+| `POST` | `/analyze/batch` | Analyze up to 25 tokens in one request (deduped, bounded concurrency, per-token error isolation) |
 | `POST` | `/score` | ML scoring only from a pre-built feature set (**no API keys / network needed**) |
 | `POST` | `/detect-ai` | AI-generated-content detection only (Claude) |
 | `POST` | `/cap/analyze` | Run `/analyze` inside a simulated CAP payment cycle |
 | `GET`  | `/health` | Liveness + which data sources are configured |
+
+### Caching & batch
+
+The expensive on-chain collection (GoPlus / Etherscan / Web3 / DEX) is cached
+**in-memory, per-process**, keyed by `(chain, address)`; scoring and AI detection
+still run fresh on top, so `project_text` is always honored. A repeated `/analyze`
+returns with `"cached": true` and skips the network (≈50× faster in practice). TTL
+is set by **`CACHE_TTL_SECONDS`** (default `600`); **`CACHE_TTL_SECONDS=0` disables
+caching entirely** (useful for fresh data / tests).
+
+`POST /analyze/batch` takes `{ "tokens": [{ "contract_address", "chain" }, …],
+"project_text"? }` and returns `{ "results": [{ "contract_address", "chain",
+"report" | "error" }, …] }` — one entry per token, in order. Duplicate tokens are
+analyzed once; a bad address or failing lookup for one token yields an `error`
+entry without failing the batch; batches over 25 tokens are rejected with `422`.
+Per-token pipelines run with bounded concurrency (`BATCH_CONCURRENCY`, default 5)
+to respect the upstream rate limits.
 
 ### `/analyze`
 
@@ -331,6 +349,9 @@ simulation backs `POST /cap/analyze`.
 | `BASE_RPC_URL` | — | Base chain RPC (on-chain reads / settlement). |
 | `CROO_SERVICE_ID` | for live CAP | The service id created on the Store. |
 | `CROO_WALLET_ADDRESS` | — | Provider wallet (settlement / logging). |
+| `CACHE_TTL_SECONDS` | — | Analyze cache TTL in seconds (default `600`; `0` disables caching). |
+| `CACHE_MAX_ENTRIES` | — | Max cached tokens before LRU eviction (default `512`). |
+| `BATCH_CONCURRENCY` | — | Max concurrent per-token analyses in `/analyze/batch` (default `5`). |
 | `HOST`, `PORT`, `LOG_LEVEL` | — | Local server config. |
 
 ---

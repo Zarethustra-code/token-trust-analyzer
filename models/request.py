@@ -91,3 +91,39 @@ class DetectAIRequest(BaseModel):
         max_length=20_000,
         description="Marketing / whitepaper text to assess for AI generation.",
     )
+
+
+# Max tokens accepted in a single batch request.
+BATCH_MAX_TOKENS = 25
+
+
+class BatchTokenItem(BaseModel):
+    """One token in a batch request.
+
+    Deliberately lenient (plain strings, no address/chain validators): a bad
+    address or unknown chain is caught per-token in the pipeline and returned as an
+    ``error`` entry, so it never fails the whole batch.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    contract_address: str
+    chain: str = "ethereum"
+
+
+class AnalyzeBatchRequest(BaseModel):
+    """Batch request: 1..BATCH_MAX_TOKENS tokens, with optional shared project_text."""
+
+    model_config = {"extra": "forbid"}
+
+    tokens: list[BatchTokenItem] = Field(
+        ...,
+        min_length=1,
+        max_length=BATCH_MAX_TOKENS,
+        description=f"1 to {BATCH_MAX_TOKENS} tokens to analyze.",
+    )
+    project_text: Optional[str] = Field(
+        default=None,
+        max_length=20_000,
+        description="Optional marketing text applied to every token in the batch.",
+    )

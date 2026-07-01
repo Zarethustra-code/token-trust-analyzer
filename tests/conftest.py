@@ -69,6 +69,18 @@ assert set(_HEALTHY) == set(FEATURE_ORDER)
 assert set(_SCAM) == set(FEATURE_ORDER)
 
 
+@pytest.fixture(autouse=True)
+def _clear_raw_cache():
+    """Clear the in-memory analyze cache before each test so it can't leak state."""
+    try:
+        import app as app_module
+
+        app_module.raw_cache.clear()
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture
 def healthy_features() -> dict:
     return copy.deepcopy(_HEALTHY)

@@ -10,8 +10,10 @@ Phase 2.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -19,6 +21,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import ValidationError
 
 from cap.cap_wrapper import simulate_cap_cycle
 from collectors.onchain_collector import OnChainCollector
@@ -29,16 +32,21 @@ from ml.scorer import TrustScorer
 from models.request import (
     SUPPORTED_CHAINS,
     AnalyzeRequest,
+    AnalyzeBatchRequest,
+    BatchTokenItem,
     DetectAIRequest,
     ScoreRequest,
 )
 from models.response import (
     AIContentResult,
+    AnalyzeBatchResponse,
+    BatchResultItem,
     DataQuality,
     TokenInfo,
     TokenMetrics,
     TrustReport,
 )
+from utils.cache import TTLCache
 
 load_dotenv()
 
@@ -58,6 +66,23 @@ DEFAULT_CHAIN = os.getenv("CHAIN", "ethereum").lower()
 # Shared, stateless singletons.
 _extractor = FeatureExtractor()
 _scorer = TrustScorer()
+
+
+def _cache_ttl_seconds() -> float:
+    """Cache TTL from env (default 600s). 0 (or invalid) disables caching."""
+    try:
+        return float(os.getenv("CACHE_TTL_SECONDS", "600"))
+    except ValueError:
+        return 600.0
+
+
+# Caches the expensive on-chain collection (RawTokenData) keyed by (chain, address).
+# Scoring + AI detection still run fresh on top, so project_text stays correct.
+# TTL is read live from the env so CACHE_TTL_SECONDS=0 disables it at runtime.
+raw_cache = TTLCache(_cache_ttl_seconds, max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "512")))
+
+# Batch endpoint: bounded concurrency protects the external APIs' rate limits.
+_BATCH_WORKERS = max(1, int(os.getenv("BATCH_CONCURRENCY", "5")))
 
 _BOOLEAN_METRIC_FIELDS = {
     "liquidity_locked", "source_verified", "has_mint",
@@ -94,14 +119,22 @@ def analyze_token(req: AnalyzeRequest) -> TrustReport:
 
     Raises ``ValueError`` for a structurally invalid address; all other data
     gaps degrade gracefully inside the collector.
+
+    The expensive on-chain collection is cached by ``(chain, address)``; scoring and
+    AI detection always run fresh on top (so ``project_text`` is honored per call).
     """
-    collector = OnChainCollector(
-        chain=req.chain,
-        rpc_url=WEB3_RPC_URL,
-        etherscan_api_key=ETHERSCAN_API_KEY,
-        goplus_api_key=GOPLUS_API_KEY,
-    )
-    raw = collector.collect(req.contract_address)
+    cache_key = (req.chain.lower(), req.contract_address.lower())
+    raw = raw_cache.get(cache_key)
+    was_cached = raw is not None
+    if not was_cached:
+        collector = OnChainCollector(
+            chain=req.chain,
+            rpc_url=WEB3_RPC_URL,
+            etherscan_api_key=ETHERSCAN_API_KEY,
+            goplus_api_key=GOPLUS_API_KEY,
+        )
+        raw = collector.collect(req.contract_address)
+        raw_cache.set(cache_key, raw)
 
     feature_set = _extractor.extract(raw)
     result = _scorer.score(feature_set)
@@ -126,8 +159,70 @@ def analyze_token(req: AnalyzeRequest) -> TrustReport:
         ),
         explanation=result.explanation,
         generated_at=_now_iso(),
+        cached=was_cached,
     )
     return report
+
+
+def _run_batch(req: AnalyzeBatchRequest) -> AnalyzeBatchResponse:
+    """Analyze a batch of tokens: dedupe, bounded concurrency, per-token isolation.
+
+    Runs on a worker thread (see the endpoint) since the pipeline is sync/requests-
+    based. Each token is validated + analyzed independently — one bad token yields an
+    ``error`` entry without failing the batch. Duplicate ``(chain, address)`` pairs are
+    computed once and reused.
+    """
+    # Preserve request order while collapsing duplicates.
+    order: list[tuple[tuple[str, str], BatchTokenItem]] = []
+    unique: dict[tuple[str, str], BatchTokenItem] = {}
+    for item in req.tokens:
+        key = (item.chain.strip().lower(), item.contract_address.strip().lower())
+        order.append((key, item))
+        unique.setdefault(key, item)
+
+    def work(item: BatchTokenItem):
+        try:
+            single = AnalyzeRequest(
+                contract_address=item.contract_address,
+                chain=item.chain,
+                project_text=req.project_text,
+            )
+        except ValidationError as exc:
+            return ("error", _validation_message(exc))
+        try:
+            return ("report", analyze_token(single))
+        except ValueError as exc:
+            return ("error", str(exc))
+        except Exception as exc:  # pragma: no cover - defensive per-token isolation
+            logger.exception("Batch token %s failed", item.contract_address)
+            return ("error", f"analysis failed: {exc}")
+
+    computed: dict[tuple[str, str], tuple[str, object]] = {}
+    with ThreadPoolExecutor(max_workers=_BATCH_WORKERS) as pool:
+        futures = {pool.submit(work, item): key for key, item in unique.items()}
+        for future in as_completed(futures):
+            computed[futures[future]] = future.result()
+
+    results: list[BatchResultItem] = []
+    for key, item in order:
+        kind, value = computed[key]
+        results.append(
+            BatchResultItem(
+                contract_address=item.contract_address,
+                chain=item.chain,
+                report=value if kind == "report" else None,
+                error=value if kind == "error" else None,
+            )
+        )
+    return AnalyzeBatchResponse(results=results)
+
+
+def _validation_message(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if errors:
+        msg = errors[0].get("msg", "invalid request")
+        return msg.replace("Value error, ", "")
+    return "invalid request"
 
 
 def score_features(req: ScoreRequest) -> TrustReport:
@@ -204,6 +299,8 @@ async def health() -> dict:
         "etherscan_configured": bool(ETHERSCAN_API_KEY),
         "rpc_configured": bool(WEB3_RPC_URL),
         "ai_detector_configured": get_detector().available,
+        "cache_enabled": raw_cache.enabled,
+        "cache_ttl_seconds": _cache_ttl_seconds(),
     }
 
 
@@ -216,6 +313,19 @@ async def analyze(req: AnalyzeRequest) -> TrustReport:
     except Exception as exc:  # pragma: no cover - defensive catch-all
         logger.exception("Unexpected error in /analyze")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+
+
+@app.post("/analyze/batch", response_model=AnalyzeBatchResponse)
+async def analyze_batch(req: AnalyzeBatchRequest) -> AnalyzeBatchResponse:
+    """Analyze up to 25 tokens in one request.
+
+    Tokens are deduplicated and run with bounded concurrency; each is isolated, so a
+    bad address / failing API for one token becomes an ``error`` entry (never a 500).
+    Batches over the size cap are rejected with 422 by request validation.
+    """
+    # The pipeline is synchronous (requests + sklearn); run the whole batch off the
+    # event loop so it doesn't block other requests.
+    return await asyncio.to_thread(_run_batch, req)
 
 
 @app.post("/score", response_model=TrustReport)

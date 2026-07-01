@@ -165,3 +165,27 @@ class TrustReport(BaseModel):
     generated_at: Optional[str] = Field(
         None, description="ISO-8601 UTC timestamp of when the report was produced."
     )
+    cached: bool = Field(
+        False, description="True when the underlying on-chain data was served from cache."
+    )
+
+
+class BatchResultItem(BaseModel):
+    """One entry in a batch response — either a report or an error, never both."""
+
+    model_config = {"extra": "forbid"}
+
+    contract_address: str
+    chain: str
+    report: Optional[TrustReport] = None
+    error: Optional[str] = Field(
+        None, description="Error message if this token could not be analyzed."
+    )
+
+
+class AnalyzeBatchResponse(BaseModel):
+    """Batch response: one result per requested token, in the same order."""
+
+    model_config = {"extra": "forbid"}
+
+    results: list[BatchResultItem] = Field(default_factory=list)

@@ -1,6 +1,13 @@
 """Pydantic request/response schemas."""
 
-from .request import AnalyzeRequest, ScoreRequest, DetectAIRequest
+from .request import (
+    AnalyzeRequest,
+    ScoreRequest,
+    DetectAIRequest,
+    BatchTokenItem,
+    AnalyzeBatchRequest,
+    BATCH_MAX_TOKENS,
+)
 from .response import (
     RiskLevel,
     TokenInfo,
@@ -10,12 +17,17 @@ from .response import (
     AIContentResult,
     DataQuality,
     TrustReport,
+    BatchResultItem,
+    AnalyzeBatchResponse,
 )
 
 __all__ = [
     "AnalyzeRequest",
     "ScoreRequest",
     "DetectAIRequest",
+    "BatchTokenItem",
+    "AnalyzeBatchRequest",
+    "BATCH_MAX_TOKENS",
     "RiskLevel",
     "TokenInfo",
     "TokenMetrics",
@@ -24,4 +36,6 @@ __all__ = [
     "AIContentResult",
     "DataQuality",
     "TrustReport",
+    "BatchResultItem",
+    "AnalyzeBatchResponse",
 ]
