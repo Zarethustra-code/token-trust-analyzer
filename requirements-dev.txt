@@ -1,0 +1,4 @@
+# Test-only dependencies (the app deps are in requirements.txt).
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27          # FastAPI TestClient

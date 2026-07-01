@@ -226,6 +226,23 @@ curl -X POST http://localhost:8000/score -H 'Content-Type: application/json' -d 
 
 ---
 
+## Running tests
+
+The suite is **fully offline** — every external call (GoPlus, Etherscan, Web3,
+Anthropic, CROO) is mocked, so it passes on a clean checkout with **no API keys**.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+It covers the rules, feature extractor, hybrid scorer (including the
+completeness weighting), the GoPlus/Etherscan collector, the AI-content detector,
+and every HTTP endpoint via `TestClient`. GitHub Actions runs it on Python 3.11
+and 3.12 for every push and pull request (`.github/workflows/tests.yml`).
+
+---
+
 ## CAP integration (the on-chain part)
 
 CAP is **event-driven** and CROO controls settlement — the provider reacts to
