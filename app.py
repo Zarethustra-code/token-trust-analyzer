@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from cap.cap_wrapper import simulate_cap_cycle
 from collectors.onchain_collector import OnChainCollector
-from croo.cap_wrapper import simulate_cap_cycle
 from detectors.ai_content_detector import get_detector
 from features.feature_extractor import FEATURE_ORDER, FeatureExtractor
 from ml.anomaly_model import get_anomaly_model
@@ -235,7 +235,7 @@ async def cap_analyze(req: AnalyzeRequest) -> dict:
     """Run /analyze inside a (simulated) CROO Post→Lock→Deliver→Clear payment cycle.
 
     The real on-chain settlement is event-driven and served by the CAP worker
-    (`python -m croo.cap_wrapper`); this endpoint is a local demo of the same
+    (`python -m cap.cap_wrapper`); this endpoint is a local demo of the same
     lifecycle wrapped around one analysis.
     """
     try:

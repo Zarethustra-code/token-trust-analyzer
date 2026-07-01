@@ -98,7 +98,7 @@ token-trust-analyzer/
 │   └── scorer.py                # blends the three signals + explanation
 ├── detectors/ai_content_detector.py  # Claude AI-text detection (optional)
 ├── models/{request,response}.py      # Pydantic I/O (Trust Report schema)
-├── croo/cap_wrapper.py          # CAP integration + local simulation
+├── cap/cap_wrapper.py           # CAP integration + local simulation
 └── data/training_tokens.json    # seed feature vectors for the Isolation Forest
 ```
 
@@ -212,43 +212,48 @@ events. Registration and **service pricing are configured on the CROO Agent Stor
 dashboard**, not in code (there is **no** `register_agent()`); the code only
 references a `service_id`.
 
-**Provider lifecycle (`croo/cap_wrapper.py`):**
+**Provider lifecycle (`cap/cap_wrapper.py`):**
 
 ```
-connect_websocket()
+connect_websocket()                       # SDK already starts the read/ping loops
   ├─ NEGOTIATION_CREATED  ── buyer wants the service
-  │     └─ accept_negotiation(e.negotiation_id)     → an Order is created
+  │     ├─ get_negotiation(e.negotiation_id) → parse .requirements (contract_address)
+  │     └─ accept_negotiation(e.negotiation_id) → Order created
+  │          (buyer request cached by result.order.order_id)
   ├─ ORDER_PAID           ── buyer's USDC is escrow-locked on Base
   │     └─ run the pipeline → deliver_order(e.order_id, DeliverOrderRequest(
   │            deliverable_type=DeliverableType.TEXT, deliverable_text=<report JSON>))
   └─ ORDER_COMPLETED      ── delivery accepted → escrow clears / settles on Base
 ```
 
-This maps to **Post → Lock → Deliver → Clear**.
+This maps to **Post → Lock → Deliver → Clear**. The buyer's inputs (contract
+address, chain, optional project text) arrive on the **Negotiation** — the code
+fetches them via `get_negotiation()` and caches the parsed request by
+`order_id`, then runs the pipeline when the order is paid.
 
 **Run the provider worker (real, on-chain):**
 
 ```bash
-python -m croo.cap_wrapper
+python -m cap.cap_wrapper
 ```
 
-With `CROO_SDK_KEY` + `CROO_API_URL` set (and `croo-sdk` installed) it serves real
-orders. **Without** them it runs a local **Post→Lock→Deliver→Clear simulation** so
-you can develop offline. The same simulation backs `POST /cap/analyze`.
+With `CROO_SDK_KEY` + `CROO_API_URL` + `CROO_WS_URL` set (and `croo-sdk`
+installed) it serves real orders. **Without** them it runs a local
+**Post→Lock→Deliver→Clear simulation** so you can develop offline. The same
+simulation backs `POST /cap/analyze`.
 
 > The SDK surface (`AgentClient`, `Config`, `EventType`, `DeliverableType`,
-> `DeliverOrderRequest`, `connect_websocket`, `accept_negotiation`,
-> `deliver_order`) was validated against `CROO-Network/python-sdk`
-> → `examples/provider.py`. A few payload-shape spots (where the buyer's inputs
-> live on a paid order; the exact stream run-loop call) are accessed defensively
-> and marked `# TODO(CAP)` — confirm against the live event/Order objects.
+> `DeliverOrderRequest`, `connect_websocket`, `get_negotiation`,
+> `accept_negotiation`, `get_order`, `reject_order`, `deliver_order`) was verified
+> against `croo-sdk` 0.2.1 / `examples/provider.py`. The local package is named
+> `cap/` (not `croo/`) so it doesn't shadow the installed SDK.
 
 ### To go live
 
 1. On the **CROO Agent Store dashboard**: register the agent, price the service, note its `service_id`.
-2. Fill the `CROO_*` variables in `.env`.
+2. Fill the `CROO_*` variables in `.env` (including the required `CROO_WS_URL`).
 3. `pip install 'croo-sdk==0.2.1'` (already in `requirements.txt`).
-4. `python -m croo.cap_wrapper`.
+4. `python -m cap.cap_wrapper`.
 
 ---
 

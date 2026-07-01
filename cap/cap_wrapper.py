@@ -3,7 +3,7 @@
 This adapter connects the Token Trust Analyzer to the CROO Agent Protocol so the
 agent can be **hired and paid on-chain**. It has two modes:
 
-* **Live provider** (``run_worker`` / ``python -m croo.cap_wrapper``) — connects to
+* **Live provider** (``run_worker`` / ``python -m cap.cap_wrapper``) — connects to
   the CROO event stream over a websocket and serves real, paid orders. This is the
   actual on-chain integration.
 * **Local simulation** (``simulate_cap_cycle``) — walks the full
@@ -11,21 +11,31 @@ agent can be **hired and paid on-chain**. It has two modes:
   pipeline, so the agent is fully testable *without* ``croo-sdk`` or credentials.
   This backs the ``/cap/analyze`` endpoint.
 
-The SDK surface below was validated against the reference provider implementation
-(`CROO-Network/python-sdk` → ``examples/provider.py``):
+NOTE on packaging: this package is named ``cap`` (not ``croo``) on purpose — a
+local package named ``croo`` would shadow the installed ``croo-sdk`` and make
+``from croo import AgentClient`` resolve to *this* code, silently disabling the
+integration. With the package named ``cap``, the import below resolves to the
+real SDK.
 
-    from croo import AgentClient, Config, EventType, DeliverableType, DeliverOrderRequest, Event
+SDK surface (verified against ``croo-sdk`` 0.2.1 / ``examples/provider.py``):
+
+    from croo import AgentClient, Config, EventType, DeliverableType, DeliverOrderRequest
     client = AgentClient(Config(base_url, ws_url, rpc_url), CROO_SDK_KEY)
-    stream = await client.connect_websocket()
-    stream.on(EventType.NEGOTIATION_CREATED, cb)   # e.negotiation_id
-    stream.on(EventType.ORDER_PAID, cb)            # e.order_id
-    result = await client.accept_negotiation(e.negotiation_id)   # -> result.order.order_id
-    await client.deliver_order(e.order_id, DeliverOrderRequest(
-        deliverable_type=DeliverableType.TEXT, deliverable_text=...))
+    stream = await client.connect_websocket()   # already starts read/ping loops
+    stream.on(EventType.NEGOTIATION_CREATED, cb) # e.negotiation_id
+    stream.on(EventType.ORDER_PAID, cb)          # e.order_id
+    neg    = await client.get_negotiation(e.negotiation_id)   # .requirements (str) + .metadata
+    result = await client.accept_negotiation(e.negotiation_id)  # -> result.order.order_id
+    order  = await client.get_order(order_id)                 # -> Order
+    await client.reject_order(order_id, reason)               # -> None
+    await client.deliver_order(order_id, DeliverOrderRequest(
+        deliverable_type=DeliverableType.TEXT, deliverable_text=<report JSON>))
 
 Registration and service PRICING happen on the CROO Agent Store dashboard, not in
-code — there is **no** ``register_agent()``. Spots that still need confirmation
-against the live event/order payload shape are marked ``# TODO(CAP)``.
+code — there is **no** ``register_agent()``. If the service is configured with
+``require_fund_transfer=true`` on the dashboard, use
+``accept_negotiation_with_fund_address(...)`` instead of ``accept_negotiation()``;
+for a flat-priced analysis service, plain accept (below) is correct.
 """
 
 from __future__ import annotations
@@ -34,13 +44,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from models.request import AnalyzeRequest
 from models.response import TrustReport
 
 logger = logging.getLogger("croo.cap")
+
+_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 # --- Defensive SDK import (the app/worker must import cleanly with or without it) ---
 try:  # pragma: no cover - depends on optional dependency
@@ -93,8 +106,12 @@ class CAPConfig:
 
     @property
     def is_configured(self) -> bool:
-        """True when the SDK is installed and live credentials are present."""
-        return bool(CROO_AVAILABLE and self.sdk_key and self.base_url)
+        """True when the SDK is installed and live credentials are present.
+
+        ``ws_url`` is required by the SDK ``Config`` for the websocket, so it is
+        part of the readiness check.
+        """
+        return bool(CROO_AVAILABLE and self.sdk_key and self.base_url and self.ws_url)
 
 
 def build_client(config: CAPConfig):
@@ -105,6 +122,8 @@ def build_client(config: CAPConfig):
         raise CAPError("CROO_SDK_KEY is not set.")
     if not config.base_url:
         raise CAPError("CROO_API_URL is not set.")
+    if not config.ws_url:
+        raise CAPError("CROO_WS_URL is not set (required for the websocket).")
     return AgentClient(
         Config(base_url=config.base_url, ws_url=config.ws_url, rpc_url=config.rpc_url),
         config.sdk_key,
@@ -124,43 +143,47 @@ async def _run_pipeline(request: AnalyzeRequest) -> TrustReport:
     return await asyncio.to_thread(analyze_token, request)
 
 
-def _request_from_order(event: Any, order: Any = None) -> AnalyzeRequest:
-    """Build an AnalyzeRequest from the buyer's paid order.
+def _coerce_params(raw: Any) -> dict:
+    """Turn a requirements/metadata value (JSON string, bare address, or dict) into a dict."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            # A plain address string is a valid, minimal "requirements".
+            return {"contract_address": text} if _ADDRESS_RE.match(text) else {}
+    return {}
 
-    # TODO(CAP): confirm where the buyer's inputs live on a paid order. The
-    #            reference provider.py exposes e.order_id but does not show the
-    #            buyer-parameter shape. We probe the most likely locations
-    #            (event/order attributes, then a JSON 'requirements'/'params'
-    #            field) and fall back to raising so failures are loud.
+
+def _request_from_negotiation(negotiation: Any) -> AnalyzeRequest:
+    """Build an AnalyzeRequest from a Negotiation's buyer inputs.
+
+    Verified against croo-sdk 0.2.1: the buyer's parameters live on
+    ``Negotiation.requirements`` (a string) and ``Negotiation.metadata`` — NOT on
+    the Order or the event. ``requirements`` is expected to be JSON like
+    ``{"contract_address": "0x..", "chain": "base", "project_text": "..."}`` (a
+    bare address string is also accepted); ``metadata`` supplements missing keys.
     """
-    candidates = (order, event)
-    data: dict = {}
-    for obj in candidates:
-        if obj is None:
-            continue
-        raw = None
-        for attr in ("requirements", "params", "input", "metadata"):
-            raw = getattr(obj, attr, None)
-            if raw:
-                break
-        if isinstance(raw, str):
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                data = {}
-        elif isinstance(raw, dict):
-            data = raw
-        # Direct attributes as a last resort.
-        addr = data.get("contract_address") or getattr(obj, "contract_address", None)
-        if addr:
-            return AnalyzeRequest(
-                contract_address=addr,
-                chain=data.get("chain") or getattr(obj, "chain", None) or "ethereum",
-                project_text=data.get("project_text"),
-            )
-    raise CAPError(
-        "Could not find a 'contract_address' on the paid order. Adjust "
-        "_request_from_order() to the real Order payload (see examples/provider.py)."
+    data = _coerce_params(getattr(negotiation, "requirements", None))
+    meta = _coerce_params(getattr(negotiation, "metadata", None))
+    for key in ("contract_address", "chain", "project_text"):
+        if not data.get(key) and meta.get(key):
+            data[key] = meta[key]
+
+    addr = (data.get("contract_address") or "").strip()
+    if not addr:
+        raise CAPError(
+            "Negotiation.requirements/metadata did not contain a contract_address."
+        )
+    return AnalyzeRequest(
+        contract_address=addr,
+        chain=(data.get("chain") or "ethereum"),
+        project_text=data.get("project_text"),
     )
 
 
@@ -176,44 +199,65 @@ def _deliverable(report: TrustReport):
 
 # --------------------------------------------------------------------------- #
 # Live provider event handlers
+#
+# The buyer's inputs arrive with the *negotiation*, but the pipeline runs when the
+# *order* is paid — so we cache the parsed request by the order_id returned from
+# accept_negotiation, keyed in `pending`.
 # --------------------------------------------------------------------------- #
-async def handle_negotiation(client, event) -> None:
-    """NEGOTIATION_CREATED → accept (creates an Order)."""
+async def handle_negotiation(client, event, pending: Dict[str, AnalyzeRequest]) -> None:
+    """NEGOTIATION_CREATED → read buyer requirements → accept → cache by order_id."""
     negotiation_id = getattr(event, "negotiation_id", None)
     if not negotiation_id:
         logger.error("NEGOTIATION_CREATED without a negotiation_id: %r", event)
         return
-    logger.info("NEGOTIATION_CREATED %s — accepting", negotiation_id)
+
     try:
+        negotiation = await client.get_negotiation(negotiation_id)
+        request = _request_from_negotiation(negotiation)
+    except CAPError as exc:
+        logger.error("Negotiation %s has no usable inputs: %s — not accepting.",
+                     negotiation_id, exc)
+        return
+    except (APIError, InsufficientBalanceError) as exc:
+        logger.error("get_negotiation(%s) failed: %s", negotiation_id, exc)
+        return
+
+    logger.info("NEGOTIATION_CREATED %s (token=%s) — accepting",
+                negotiation_id, request.contract_address)
+    try:
+        # Flat-priced service → plain accept. For require_fund_transfer=true
+        # services, use client.accept_negotiation_with_fund_address(...) instead.
         result = await client.accept_negotiation(negotiation_id)
     except (APIError, InsufficientBalanceError) as exc:
         logger.error("accept_negotiation(%s) failed: %s", negotiation_id, exc)
         return
-    order = getattr(result, "order", None)
-    logger.info("Order created: %s", getattr(order, "order_id", "<unknown>"))
+
+    order = getattr(result, "order", None)   # AcceptNegotiationResult.order
+    order_id = getattr(order, "order_id", None)
+    if order_id:
+        pending[order_id] = request
+        logger.info("Order created: %s (awaiting payment)", order_id)
+    else:
+        logger.warning("accept_negotiation(%s) returned no order_id: %r",
+                       negotiation_id, result)
 
 
-async def handle_paid_order(client, event) -> None:
+async def handle_paid_order(client, event, pending: Dict[str, AnalyzeRequest]) -> None:
     """ORDER_PAID (escrow locked) → run pipeline → deliver_order."""
     order_id = getattr(event, "order_id", None)
     if not order_id:
         logger.error("ORDER_PAID without an order_id: %r", event)
         return
 
-    # Fetch full order details if the SDK exposes it (reference didn't confirm).
-    order = None
-    get_order = getattr(client, "get_order", None)
-    if callable(get_order):  # TODO(CAP): confirm get_order exists / its return shape
-        try:
-            order = await get_order(order_id)
-        except Exception as exc:
-            logger.info("get_order(%s) unavailable: %s", order_id, exc)
-
-    try:
-        request = _request_from_order(event, order)
-    except CAPError as exc:
-        logger.error("Cannot build request for order %s: %s", order_id, exc)
-        await _safe_reject_order(client, order_id, str(exc))
+    request = pending.pop(order_id, None)
+    if request is None:
+        # Cache miss (e.g. worker restarted between accept and payment): recover
+        # the negotiation via the order, then re-parse its requirements.
+        request = await _recover_request(client, order_id)
+    if request is None:
+        reason = "provider lost the buyer requirements for this order"
+        logger.error("Order %s: %s — rejecting.", order_id, reason)
+        await _safe_reject_order(client, order_id, reason)
         return
 
     logger.info("ORDER_PAID %s — analyzing %s", order_id, request.contract_address)
@@ -234,6 +278,24 @@ async def handle_paid_order(client, event) -> None:
         logger.error("deliver_order(%s) failed: %s", order_id, exc)
 
 
+async def _recover_request(client, order_id: str) -> Optional[AnalyzeRequest]:
+    """Best-effort recovery of the buyer request from a paid order."""
+    try:
+        order = await client.get_order(order_id)
+    except (APIError, InsufficientBalanceError) as exc:
+        logger.info("get_order(%s) failed during recovery: %s", order_id, exc)
+        return None
+    negotiation_id = getattr(order, "negotiation_id", None)
+    if not negotiation_id:
+        return None
+    try:
+        negotiation = await client.get_negotiation(negotiation_id)
+        return _request_from_negotiation(negotiation)
+    except (CAPError, APIError, InsufficientBalanceError) as exc:
+        logger.info("Could not recover request for order %s: %s", order_id, exc)
+        return None
+
+
 async def handle_order_completed(_client, event) -> None:
     """ORDER_COMPLETED → escrow cleared, settled on-chain (USDC on Base)."""
     logger.info(
@@ -243,12 +305,8 @@ async def handle_order_completed(_client, event) -> None:
 
 
 async def _safe_reject_order(client, order_id: str, reason: str) -> None:
-    reject = getattr(client, "reject_order", None)  # TODO(CAP): confirm reject_order
-    if not callable(reject):
-        logger.warning("No reject_order on client; order %s left unhandled.", order_id)
-        return
     try:
-        await reject(order_id, reason)
+        await client.reject_order(order_id, reason)  # confirmed: async, returns None
     except (APIError, InsufficientBalanceError) as exc:
         logger.error("reject_order(%s) failed: %s", order_id, exc)
 
@@ -265,16 +323,21 @@ async def run_worker(config: Optional[CAPConfig] = None) -> None:
         config.service_id or "<unset>", config.wallet_address or "<unset>",
     )
 
+    # connect_websocket() already calls stream.connect() and starts the background
+    # read/ping loops — do NOT call it again (double-dial). We just register
+    # handlers and keep the process alive.
     stream = await client.connect_websocket()
 
+    # order_id -> parsed buyer request, populated on accept, consumed on payment.
+    pending: Dict[str, AnalyzeRequest] = {}
+
     # EventStream.on() dispatches handlers synchronously (it does not await them),
-    # so register plain callbacks that schedule the async work — the provider.py
-    # pattern.
+    # so register plain callbacks that schedule the async work.
     def on_negotiation(event) -> None:
-        asyncio.create_task(handle_negotiation(client, event))
+        asyncio.create_task(handle_negotiation(client, event, pending))
 
     def on_order_paid(event) -> None:
-        asyncio.create_task(handle_paid_order(client, event))
+        asyncio.create_task(handle_paid_order(client, event, pending))
 
     def on_order_completed(event) -> None:
         asyncio.create_task(handle_order_completed(client, event))
@@ -284,25 +347,9 @@ async def run_worker(config: Optional[CAPConfig] = None) -> None:
     stream.on(EventType.ORDER_COMPLETED, on_order_completed)
 
     logger.info("Listening for negotiations and paid orders. Ctrl-C to stop.")
-    # TODO(CAP): confirm the run/dispatch call. examples/provider.py opens the
-    #            stream and registers handlers; the process then stays alive
-    #            dispatching events. We try the likely blocking calls, else idle.
-    run = getattr(stream, "connect", None) or getattr(stream, "run", None) \
-        or getattr(stream, "listen", None)
     try:
-        if callable(run):
-            await run()
-        else:
-            while True:
-                await asyncio.sleep(3600)
+        await asyncio.Event().wait()  # idle forever; the SDK drives the stream
     finally:
-        for closer in ("close",):
-            fn = getattr(stream, closer, None)
-            if callable(fn):
-                try:
-                    await fn()
-                except Exception:
-                    pass
         close = getattr(client, "close", None)
         if callable(close):
             try:
@@ -328,7 +375,8 @@ async def simulate_cap_cycle(
 
     lifecycle = [
         {"stage": "POST", "event": "NEGOTIATION_CREATED",
-         "detail": f"buyer requests service_id={config.service_id or '<unset>'}"},
+         "detail": f"buyer requests service_id={config.service_id or '<unset>'}; "
+                   f"requirements carry contract_address={request.contract_address}"},
         {"stage": "LOCK", "event": "ORDER_PAID",
          "detail": "buyer USDC escrow-locked on Base", "tx_hash": "0xSIMULATED_PAY"},
         {"stage": "DELIVER", "event": "deliver_order",
@@ -366,8 +414,8 @@ async def _main() -> None:
         await run_worker(config)
     else:
         logger.warning(
-            "CAP not configured (need croo-sdk + CROO_SDK_KEY + CROO_API_URL) — "
-            "running a local Post→Lock→Deliver→Clear SIMULATION."
+            "CAP not configured (need croo-sdk + CROO_SDK_KEY + CROO_API_URL + "
+            "CROO_WS_URL) — running a local Post→Lock→Deliver→Clear SIMULATION."
         )
         sample = AnalyzeRequest(
             contract_address="0x6B175474E89094C44Da98b954EedeAC495271d0F",  # DAI
