@@ -65,9 +65,17 @@ class AnomalyModel:
         matrix = np.asarray(vectors, dtype=float)
         self.scaler = StandardScaler()
         scaled = self.scaler.fit_transform(matrix)
+        # contamination: the training set is a curated set of *healthy* tokens, so
+        # we expect only a few genuine oddities (e.g. legit tokens with very high
+        # single-holder concentration). A small fixed value keeps this assumption
+        # explicit and conservative rather than letting 'auto' infer a larger
+        # outlier fraction on the broader set. NB: our 0-100 output is calibrated
+        # from `score_samples` percentiles below, which sklearn computes
+        # independently of `contamination`, so this mainly documents intent and
+        # only affects the (unused) predict()/decision_function() threshold.
         self.forest = IsolationForest(
             n_estimators=200,
-            contamination="auto",
+            contamination=0.02,
             random_state=42,
             n_jobs=-1,
         )

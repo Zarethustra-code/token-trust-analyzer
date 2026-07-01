@@ -55,6 +55,27 @@ Missing values are imputed to a **healthy-token prior** so that *absence of data
 is treated neutrally* by the model (the rule engine, conversely, only penalizes
 confirmed risks). `gini` is derived from the holder distribution.
 
+### Rebuilding the training set
+
+The Isolation Forest learns "normal" from `data/training_tokens.json`. To
+regenerate it with a larger, more diverse set of *healthy* tokens:
+
+```bash
+python scripts/build_training_set.py --target 200
+```
+
+This pulls a curated list of well-known, legitimate ERC-20s (Ethereum + Base)
+through the **same** collector + extractor the app uses at inference time, and
+verifies each token's returned symbol against its expected symbol (mismatches are
+dropped, so a mistyped address can't pollute the set). It then tops up to
+`--target` with **synthetic** healthy rows sampled from the seed distribution
+(`data/seed_tokens.json`). Offline, or to skip the network, use
+`--synthetic-only` — the whole set is then generated synthetically. The script
+refreshes the cached model so the Isolation Forest refits on the next app start.
+A broader set markedly reduces false anomalies on legitimate tokens (e.g. DAI's
+anomaly score dropped from ~69/100 on the original 45-row seed to ~0 on the
+expanded set).
+
 ---
 
 ## Architecture
