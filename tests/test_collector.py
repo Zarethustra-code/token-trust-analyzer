@@ -11,11 +11,13 @@ from tests.conftest import make_goplus_entry
 _DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F"  # valid, checksummed
 
 
-def _collector(monkeypatch, goplus_entry, etherscan_result=None):
-    """An OnChainCollector with GoPlus + Etherscan stubbed (no network, no keys)."""
+def _collector(monkeypatch, goplus_entry, etherscan_result=None, dex_metrics=None):
+    """An OnChainCollector with GoPlus + Etherscan + DEX stubbed (no network, no keys)."""
     col = OnChainCollector(chain="ethereum")
     monkeypatch.setattr(col, "_goplus", lambda checksum: goplus_entry)
     monkeypatch.setattr(col, "_etherscan", lambda *a, **k: etherscan_result)
+    # DEX source defaults to unavailable so tests stay offline unless they opt in.
+    monkeypatch.setattr("collectors.onchain_collector.fetch_dex_metrics", lambda *a, **k: dex_metrics)
     return col
 
 
@@ -81,6 +83,29 @@ def test_graceful_degradation_when_goplus_unavailable(monkeypatch):
         assert data[name] is None              # nothing could be fetched
     assert any("goplus" in n.lower() for n in data["notes"])
     assert data["missing_fields"] == list(FEATURE_ORDER) or set(data["missing_fields"]) == set(FEATURE_ORDER)
+
+
+def test_dex_fills_market_features(monkeypatch):
+    """DEX source fills the two market features GoPlus can't provide."""
+    dex = {"source": "dexscreener", "liquidity_to_mcap_ratio": 0.3, "buy_sell_ratio": 1.25}
+    col = _collector(monkeypatch, make_goplus_entry(), dex_metrics=dex)
+    data = col.collect(_DAI)
+
+    assert data["liquidity_to_mcap_ratio"] == 0.3
+    assert data["buy_sell_ratio"] == 1.25
+    assert "dexscreener" in data["sources_used"]
+    # filled -> no longer imputed/missing
+    assert "liquidity_to_mcap_ratio" not in data["missing_fields"]
+    assert "buy_sell_ratio" not in data["missing_fields"]
+
+
+def test_dex_does_not_overwrite_and_notes_on_failure(monkeypatch):
+    # DEX unavailable -> fields stay None, a note explains, nothing raised.
+    col = _collector(monkeypatch, make_goplus_entry(), dex_metrics=None)
+    data = col.collect(_DAI)
+    assert data["liquidity_to_mcap_ratio"] is None
+    assert data["buy_sell_ratio"] is None
+    assert any("DEX market data unavailable" in n for n in data["notes"])
 
 
 def test_invalid_address_raises_value_error(monkeypatch):

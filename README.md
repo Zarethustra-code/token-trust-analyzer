@@ -131,6 +131,8 @@ token-trust-analyzer/
 | --- | --- | --- |
 | **GoPlus Token Security** | **Primary** (public, no key) | holder distribution, honeypot, buy/sell tax, mint, blacklist, owner/renounced, hidden-owner, take-back-ownership, anti-whale, LP-lock |
 | **Etherscan V2** (multichain) | verified source + contract age | `source_verified`, `contract_age_days` |
+| **DexScreener** | **DEX market data** (primary, no key) | `liquidity_to_mcap_ratio`, `buy_sell_ratio` (aggregated across pools) |
+| **GeckoTerminal** | DEX market data (fallback, no key) | same two fields when DexScreener is unavailable |
 | **Web3.py** (JSON-RPC) | fallback | name/symbol/decimals/supply, `owner()` |
 
 The GoPlus flags are fed into the model as **raw numeric features** — the agent's
@@ -138,6 +140,14 @@ value is *combining* these disconnected signals into one anomaly-aware score, no
 re-emitting a single flag as the verdict. Everything degrades gracefully: any
 field that can't be fetched becomes `None`, is imputed for the model, and is
 reported under `data_quality.missing_fields`.
+
+GoPlus doesn't expose market/liquidity/trading data, so the two market features
+(`liquidity_to_mcap_ratio`, `buy_sell_ratio`) are filled from live DEX pool data —
+**[DexScreener](https://dexscreener.com)** first, falling back to
+**[GeckoTerminal](https://www.geckoterminal.com)** (data courtesy of GeckoTerminal).
+Both are free and keyless; if both are unavailable the two fields simply stay
+imputed. Filling them raises `data_completeness`, which the completeness-aware
+scorer rewards (e.g. DAI moves from 75% / MEDIUM confidence to 85% / HIGH).
 
 ---
 

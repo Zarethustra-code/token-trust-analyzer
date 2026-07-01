@@ -30,6 +30,7 @@ try:
 except Exception:  # pragma: no cover
     Web3 = None  # type: ignore
 
+from collectors.dex_source import fetch_dex_metrics
 from features.feature_extractor import FEATURE_ORDER as FEATURE_FIELDS
 from models.request import SUPPORTED_CHAINS
 
@@ -145,6 +146,7 @@ class OnChainCollector:
         # contract age (which it owns), and only *fills gaps* for anything GoPlus
         # could not provide. Web3 is the direct-read fallback.
         self._collect_goplus(checksum, data)
+        self._collect_dex(checksum, data)
         self._collect_metadata(checksum, data)
         self._collect_source_analysis(checksum, data)
         self._collect_creation_age(checksum, data)
@@ -333,6 +335,35 @@ class OnChainCollector:
                     locked_fraction += pct  # fraction 0..1
             data["liquidity_locked"] = bool(locked_fraction >= 0.5)
         # liquidity_to_mcap_ratio needs price/market-cap (not in GoPlus); left None.
+
+    def _collect_dex(self, checksum: str, data: RawTokenData) -> None:
+        """Fill liquidity_to_mcap_ratio + buy_sell_ratio from DEX pool data.
+
+        Runs after GoPlus; GoPlus stays authoritative, so this only fills the two
+        fields when they are still ``None`` (via ``_set_if_none``).
+        """
+        if (data.get("liquidity_to_mcap_ratio") is not None
+                and data.get("buy_sell_ratio") is not None):
+            return  # nothing left for the DEX source to fill
+
+        metrics = fetch_dex_metrics(self.chain, checksum, timeout=min(self.timeout, 8.0))
+        if not metrics:
+            data["notes"].append(
+                "DEX market data unavailable (DexScreener + GeckoTerminal); "
+                "liquidity/mcap and buy/sell ratios left unknown."
+            )
+            return
+
+        before = {f: data.get(f) for f in ("liquidity_to_mcap_ratio", "buy_sell_ratio")}
+        self._set_if_none(data, "liquidity_to_mcap_ratio", metrics.get("liquidity_to_mcap_ratio"))
+        self._set_if_none(data, "buy_sell_ratio", metrics.get("buy_sell_ratio"))
+        filled = [f for f, prev in before.items() if prev is None and data.get(f) is not None]
+
+        if filled:
+            data["sources_used"].append(metrics["source"])
+            data["notes"].append(
+                f"DEX metrics from {metrics['source']} filled: {', '.join(filled)}."
+            )
 
     def _collect_metadata(self, checksum: str, data: RawTokenData) -> None:
         contract = self._contract(checksum)
@@ -531,9 +562,10 @@ class OnChainCollector:
                 data["notes"].append("recent_tx_count capped at the 1000-row page limit.")
         else:
             data["notes"].append("Recent activity unavailable; recent_tx_count imputed.")
-        # buy/sell classification requires identifying the DEX pair address; out of
-        # scope for the free tier — left as None so it is imputed neutrally.
-        data["notes"].append("buy_sell_ratio requires DEX pair data (not collected).")
+        # buy_sell_ratio is filled by the DEX source (_collect_dex) when available;
+        # only note it if that lookup left it unknown.
+        if data.get("buy_sell_ratio") is None:
+            data["notes"].append("buy_sell_ratio unavailable (no DEX data); imputed.")
 
     def _collect_liquidity(self, checksum: str, data: RawTokenData) -> None:
         """Liquidity-lock comes from GoPlus LP data; note the gap only if unknown."""
