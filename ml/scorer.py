@@ -2,7 +2,7 @@
 
 Combines the three signals into a single 0-100 risk score:
 
-    final = clamp( W_ANOMALY * anomaly_score          # Isolation Forest, 0-100
+    final = clamp( W_ANOMALY * anomaly_score * completeness_factor  # Isolation Forest, 0-100
                  + rule_penalty_total                 # interpretable heuristics
                  + W_SUPERVISED * supervised_prob*100  # XGBoost, 0 if no model
                  , 0, 100 )
@@ -10,6 +10,12 @@ Combines the three signals into a single 0-100 risk score:
 Higher score = riskier. The scorer emits a full :class:`ScoreBreakdown` and a
 plain-language ``explanation`` so every point in the final number is traceable
 to a specific feature or model.
+
+The anomaly term is **down-weighted by data completeness**: when many features
+were unavailable and imputed, the Isolation Forest is working on a partly-guessed
+profile, so its contribution is scaled by ``completeness_factor`` (floored at
+``ANOMALY_COMPLETENESS_FLOOR``). Rule penalties are left at full strength — they
+rest on directly-observed GoPlus facts, not imputed values.
 """
 
 from __future__ import annotations
@@ -27,6 +33,19 @@ from ml.supervised_model import SupervisedModel, get_supervised_model
 # dominates. Tunable without touching the report contract.
 W_ANOMALY = 0.35
 W_SUPERVISED = 0.35
+
+# The anomaly contribution is scaled by data completeness, but never below this
+# floor — even a sparse profile carries *some* anomaly signal.
+ANOMALY_COMPLETENESS_FLOOR = 0.35
+
+
+def _confidence_label(completeness: float) -> str:
+    """Map data completeness (0..1) to a confidence band."""
+    if completeness >= 0.85:
+        return "HIGH"
+    if completeness >= 0.60:
+        return "MEDIUM"
+    return "LOW"
 
 
 @dataclass
@@ -64,9 +83,13 @@ class TrustScorer:
             for r in fired
         ]
 
-        # 2) Isolation Forest anomaly contribution.
+        # 2) Isolation Forest anomaly contribution, down-weighted by how much of
+        #    the feature vector was directly observed (vs imputed).
         anomaly_score = self.anomaly.score(feature_set.vector)
-        anomaly_contribution = W_ANOMALY * anomaly_score
+        data_completeness = 1.0 - len(feature_set.imputed_features) / len(feature_set.vector)
+        completeness_factor = max(ANOMALY_COMPLETENESS_FLOOR, data_completeness)
+        anomaly_contribution = W_ANOMALY * anomaly_score * completeness_factor
+        confidence = _confidence_label(data_completeness)
 
         # 3) Optional supervised probability.
         supervised_prob01 = self.supervised.predict_proba(feature_set.vector)
@@ -87,6 +110,9 @@ class TrustScorer:
             anomaly_score=round(anomaly_score, 2),
             anomaly_weight=W_ANOMALY,
             anomaly_contribution=round(anomaly_contribution, 2),
+            data_completeness=round(data_completeness, 3),
+            completeness_factor=round(completeness_factor, 3),
+            confidence=confidence,
             supervised_prob=None if supervised_prob100 is None else round(supervised_prob100, 2),
             supervised_weight=W_SUPERVISED,
             supervised_contribution=round(supervised_contribution, 2),
@@ -96,7 +122,7 @@ class TrustScorer:
         flags = [r.flag for r in fired]
         explanation = self._explain(
             final, risk_level, fired, anomaly_score, anomaly_contribution,
-            supervised_prob100, feature_set,
+            supervised_prob100, feature_set, data_completeness, confidence,
         )
         return ScoringResult(
             trust_score=final,
@@ -115,6 +141,8 @@ class TrustScorer:
         anomaly_contribution: float,
         supervised_prob100: float | None,
         feature_set: FeatureSet,
+        data_completeness: float,
+        confidence: str,
     ) -> str:
         parts: list[str] = [
             f"Risk score {final}/100 ({level.value}). Higher means riskier."
@@ -138,8 +166,10 @@ class TrustScorer:
             )
         if feature_set.imputed_features:
             parts.append(
-                "Note: the following features were unavailable and imputed to a "
-                "healthy-token baseline (so they neither raised nor lowered the "
-                f"score): {', '.join(feature_set.imputed_features)}."
+                f"Data completeness {data_completeness * 100:.0f}% ({confidence} "
+                "confidence): the following features were unavailable and imputed to "
+                "a healthy-token baseline, so the anomaly contribution was "
+                "down-weighted accordingly: "
+                f"{', '.join(feature_set.imputed_features)}."
             )
         return " ".join(parts)

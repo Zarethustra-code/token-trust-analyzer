@@ -99,7 +99,16 @@ class ScoreBreakdown(BaseModel):
     )
     anomaly_weight: float = 0.0
     anomaly_contribution: float = Field(
-        0.0, description="anomaly_score * anomaly_weight (points added)."
+        0.0, description="anomaly_score * anomaly_weight * completeness_factor (points added)."
+    )
+    data_completeness: float = Field(
+        1.0, description="Fraction of features directly observed (1 - imputed/total)."
+    )
+    completeness_factor: float = Field(
+        1.0, description="Down-weight applied to the anomaly contribution (>= floor)."
+    )
+    confidence: str = Field(
+        "HIGH", description="Confidence band from data completeness: HIGH/MEDIUM/LOW."
     )
     supervised_prob: Optional[float] = Field(
         None, description="XGBoost P(scam) in [0,100], or null if no model is loaded."
