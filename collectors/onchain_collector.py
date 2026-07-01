@@ -376,8 +376,21 @@ class OnChainCollector:
         """Verified-source flag + ABI-based mint/blacklist/ownership detection."""
         result = self._etherscan("contract", "getsourcecode", address=checksum)
         if not result or not isinstance(result, list):
-            data["notes"].append("Source/ABI unavailable; verification, mint, and "
-                                 "blacklist flags could not be determined.")
+            undetermined = [
+                label
+                for label, key in (
+                    ("verification", "source_verified"),
+                    ("mint", "has_mint"),
+                    ("blacklist", "has_blacklist"),
+                )
+                if data.get(key) is None
+            ]
+            if undetermined:
+                data["notes"].append(
+                    "Etherscan source/ABI unavailable; "
+                    + ", ".join(undetermined)
+                    + " flag(s) could not be independently confirmed."
+                )
             return
         entry = result[0] if result else {}
         source_code = (entry.get("SourceCode") or "").strip()
