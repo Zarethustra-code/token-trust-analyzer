@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover
     Web3 = None  # type: ignore
 
 from collectors.dex_source import fetch_dex_metrics
+from collectors.honeypot_source import fetch_honeypot_check
 from features.feature_extractor import FEATURE_ORDER as FEATURE_FIELDS
 from models.request import SUPPORTED_CHAINS
 
@@ -146,6 +147,7 @@ class OnChainCollector:
         # contract age (which it owns), and only *fills gaps* for anything GoPlus
         # could not provide. Web3 is the direct-read fallback.
         self._collect_goplus(checksum, data)
+        self._collect_honeypot_crosscheck(checksum, data)
         self._collect_dex(checksum, data)
         self._collect_metadata(checksum, data)
         self._collect_source_analysis(checksum, data)
@@ -364,6 +366,54 @@ class OnChainCollector:
             data["notes"].append(
                 f"DEX metrics from {metrics['source']} filled: {', '.join(filled)}."
             )
+
+    def _collect_honeypot_crosscheck(self, checksum: str, data: RawTokenData) -> None:
+        """Cross-check GoPlus's is_honeypot against Honeypot.is (simulation-based).
+
+        Conservative combine: agreement keeps the value; a *disagreement* flags
+        honeypot=True with a visible conflict note; a missing GoPlus value is
+        gap-filled. Also gap-fills buy/sell tax from the simulation (via
+        ``_set_if_none``) when GoPlus didn't provide them.
+        """
+        result = fetch_honeypot_check(self.chain, checksum, timeout=min(self.timeout, 8.0))
+        if result is None:
+            data["notes"].append(
+                "Honeypot.is cross-check unavailable; honeypot status is from GoPlus only."
+            )
+            return
+
+        data["sources_used"].append("honeypot.is")
+        hp = result["is_honeypot"]           # bool from simulation
+        reason = result.get("reason")
+        gp_raw = data.get("is_honeypot")     # GoPlus value: 1.0 / 0.0 / None
+        gp = None if gp_raw is None else (float(gp_raw) >= 0.5)
+        reason_suffix = f" ({reason})" if reason else ""
+
+        if gp is None:
+            # GoPlus had no signal -> take Honeypot.is.
+            data["is_honeypot"] = 1.0 if hp else 0.0
+            if hp:
+                data["notes"].append(
+                    f"Honeypot.is flags this token as a honeypot{reason_suffix} "
+                    "(GoPlus had no signal)."
+                )
+        elif gp == hp:
+            if hp:
+                data["notes"].append(
+                    f"Honeypot confirmed by two sources (GoPlus + Honeypot.is){reason_suffix}."
+                )
+            # both clean -> nothing to note
+        else:
+            # Disagreement -> err on the safe side and make it visible.
+            data["is_honeypot"] = 1.0
+            data["notes"].append(
+                f"Conflicting honeypot signals: GoPlus={gp}, Honeypot.is={hp}{reason_suffix} "
+                "— flagged conservatively (is_honeypot=True)."
+            )
+
+        # Gap-fill taxes from the simulation only where GoPlus left them unknown.
+        self._set_if_none(data, "buy_tax", result.get("buy_tax"))
+        self._set_if_none(data, "sell_tax", result.get("sell_tax"))
 
     def _collect_metadata(self, checksum: str, data: RawTokenData) -> None:
         contract = self._contract(checksum)

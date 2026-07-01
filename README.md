@@ -130,6 +130,7 @@ token-trust-analyzer/
 | Source | Role | Provides |
 | --- | --- | --- |
 | **GoPlus Token Security** | **Primary** (public, no key) | holder distribution, honeypot, buy/sell tax, mint, blacklist, owner/renounced, hidden-owner, take-back-ownership, anti-whale, LP-lock |
+| **Honeypot.is** | honeypot cross-check (simulation, keyless) | independent `is_honeypot` second opinion + buy/sell tax gap-fill |
 | **Etherscan V2** (multichain) | verified source + contract age | `source_verified`, `contract_age_days` |
 | **DexScreener** | **DEX market data** (primary, no key) | `liquidity_to_mcap_ratio`, `buy_sell_ratio` (aggregated across pools) |
 | **GeckoTerminal** | DEX market data (fallback, no key) | same two fields when DexScreener is unavailable |
@@ -148,6 +149,15 @@ GoPlus doesn't expose market/liquidity/trading data, so the two market features
 Both are free and keyless; if both are unavailable the two fields simply stay
 imputed. Filling them raises `data_completeness`, which the completeness-aware
 scorer rewards (e.g. DAI moves from 75% / MEDIUM confidence to 85% / HIGH).
+
+**Honeypot cross-check.** GoPlus's `is_honeypot` is static analysis;
+**[Honeypot.is](https://honeypot.is)** independently *simulates* a buy + sell as a
+second opinion (free, keyless; optional `HONEYPOT_IS_API_KEY` for higher limits).
+The two are combined conservatively: if they **disagree**, the token is flagged
+`is_honeypot = true` and a `data_quality` note records the conflict; if one source
+has no signal, the other fills it. It also gap-fills buy/sell tax from the
+simulation when GoPlus didn't provide them. `is_honeypot` stays a single feature —
+just set more safely — so no retrain is needed.
 
 ---
 
@@ -338,6 +348,7 @@ simulation backs `POST /cap/analyze`.
 | Var | Required | Purpose |
 | --- | --- | --- |
 | `GOPLUS_API_KEY` | — | GoPlus works keyless; set only to raise rate limits. |
+| `HONEYPOT_IS_API_KEY` | — | Honeypot.is works keyless; optional key raises rate limits (`X-API-KEY`). |
 | `ETHERSCAN_API_KEY` | recommended | Verified-source + contract age (Etherscan V2). |
 | `WEB3_RPC_URL` | recommended | JSON-RPC endpoint (direct ERC-20 reads, `owner()`). |
 | `CHAIN` | — | Default chain (`ethereum` \| `base`). |

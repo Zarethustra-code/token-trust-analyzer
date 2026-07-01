@@ -11,13 +11,14 @@ from tests.conftest import make_goplus_entry
 _DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F"  # valid, checksummed
 
 
-def _collector(monkeypatch, goplus_entry, etherscan_result=None, dex_metrics=None):
-    """An OnChainCollector with GoPlus + Etherscan + DEX stubbed (no network, no keys)."""
+def _collector(monkeypatch, goplus_entry, etherscan_result=None, dex_metrics=None, honeypot=None):
+    """An OnChainCollector with GoPlus + Etherscan + DEX + Honeypot.is stubbed (offline)."""
     col = OnChainCollector(chain="ethereum")
     monkeypatch.setattr(col, "_goplus", lambda checksum: goplus_entry)
     monkeypatch.setattr(col, "_etherscan", lambda *a, **k: etherscan_result)
-    # DEX source defaults to unavailable so tests stay offline unless they opt in.
+    # External sources default to unavailable so tests stay offline unless they opt in.
     monkeypatch.setattr("collectors.onchain_collector.fetch_dex_metrics", lambda *a, **k: dex_metrics)
+    monkeypatch.setattr("collectors.onchain_collector.fetch_honeypot_check", lambda *a, **k: honeypot)
     return col
 
 
@@ -106,6 +107,64 @@ def test_dex_does_not_overwrite_and_notes_on_failure(monkeypatch):
     assert data["liquidity_to_mcap_ratio"] is None
     assert data["buy_sell_ratio"] is None
     assert any("DEX market data unavailable" in n for n in data["notes"])
+
+
+# --- Honeypot.is cross-check combine logic ---------------------------------- #
+def _hp(is_honeypot, reason=None, buy_tax=None, sell_tax=None):
+    return {"is_honeypot": is_honeypot, "reason": reason, "buy_tax": buy_tax, "sell_tax": sell_tax}
+
+
+def test_honeypot_both_agree_flagged(monkeypatch):
+    col = _collector(monkeypatch, make_goplus_entry(is_honeypot="1"),
+                     honeypot=_hp(True, reason="cannot sell"))
+    data = col.collect(_DAI)
+    assert data["is_honeypot"] == 1.0
+    assert "honeypot.is" in data["sources_used"]
+    assert any("confirmed by two sources" in n.lower() for n in data["notes"])
+
+
+def test_honeypot_both_agree_clean(monkeypatch):
+    col = _collector(monkeypatch, make_goplus_entry(is_honeypot="0"), honeypot=_hp(False))
+    data = col.collect(_DAI)
+    assert data["is_honeypot"] == 0.0
+    assert "honeypot.is" in data["sources_used"]
+    assert not any("conflicting" in n.lower() for n in data["notes"])
+
+
+def test_honeypot_disagreement_flags_conservatively(monkeypatch):
+    # GoPlus says clean, Honeypot.is says honeypot -> flag True + conflict note.
+    col = _collector(monkeypatch, make_goplus_entry(is_honeypot="0"),
+                     honeypot=_hp(True, reason="high sell tax"))
+    data = col.collect(_DAI)
+    assert data["is_honeypot"] == 1.0
+    note = next((n for n in data["notes"] if "conflicting honeypot" in n.lower()), "")
+    assert note and "GoPlus=False" in note and "Honeypot.is=True" in note
+
+
+def test_honeypot_gapfills_when_goplus_missing(monkeypatch):
+    entry = make_goplus_entry()
+    entry.pop("is_honeypot")                       # GoPlus has no honeypot signal
+    col = _collector(monkeypatch, entry, honeypot=_hp(True, reason="trap"))
+    data = col.collect(_DAI)
+    assert data["is_honeypot"] == 1.0
+    assert "honeypot.is" in data["sources_used"]
+
+
+def test_honeypot_unavailable_keeps_goplus(monkeypatch):
+    col = _collector(monkeypatch, make_goplus_entry(is_honeypot="0"), honeypot=None)
+    data = col.collect(_DAI)
+    assert data["is_honeypot"] == 0.0              # unchanged
+    assert "honeypot.is" not in data["sources_used"]
+    assert any("honeypot.is cross-check unavailable" in n.lower() for n in data["notes"])
+
+
+def test_honeypot_gapfills_taxes_only_when_goplus_missing(monkeypatch):
+    entry = make_goplus_entry()   # buy_tax "0.01" -> 1.0, sell_tax "0.02" -> 2.0
+    entry["buy_tax"] = ""         # make GoPlus buy_tax unavailable (None)
+    col = _collector(monkeypatch, entry, honeypot=_hp(False, buy_tax=3.0, sell_tax=7.0))
+    data = col.collect(_DAI)
+    assert data["buy_tax"] == 3.0                  # was None -> gap-filled from Honeypot.is
+    assert data["sell_tax"] == 2.0                 # GoPlus value kept (not overwritten)
 
 
 def test_invalid_address_raises_value_error(monkeypatch):
