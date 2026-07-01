@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets / local config (only .env.example is committed)
+.env
+.env.local
+
+# Trained ML artifacts (regenerated on first run from data/training_tokens.json)
+data/anomaly_model.joblib
+data/supervised_model.joblib
+*.joblib
+*.pkl
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
