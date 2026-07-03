@@ -201,6 +201,42 @@ third-party frontend calls).
 
 ---
 
+## Run with Docker
+
+Build once, then run the whole pipeline in a clean container — no local Python
+setup, reproducible for the demo/deploy.
+
+```bash
+docker build -t token-trust-analyzer .
+docker run -p 8000:8000 token-trust-analyzer
+```
+
+Then open **http://localhost:8000/ui** (dashboard) and
+**http://localhost:8000/docs** (Swagger). On startup the container fits the
+Isolation Forest from `data/training_tokens.json` (visible in the log); once it's
+ready, `GET /health` returns `status: ok`.
+
+**Keys are passed at runtime, never baked into the image.** GoPlus is keyless, so
+the container runs with no config at all; add the optional/recommended vars (see
+[Environment variables](#environment-variables)) via `--env-file` or `-e`:
+
+```bash
+docker run -p 8000:8000 --env-file .env token-trust-analyzer
+```
+
+Or with Compose (reads `.env` if present):
+
+```bash
+docker compose up --build
+```
+
+The image is a lean `python:3.12-slim` (production deps only — the test suite and
+`requirements-dev.txt` are not shipped) and runs as a non-root user. The trained
+model isn't included: it refits fresh on first boot from the training data that
+ships in the image.
+
+---
+
 ## HTTP API
 
 | Method | Path | Description |

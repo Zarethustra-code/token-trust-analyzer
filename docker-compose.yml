@@ -1,0 +1,15 @@
+# Minimal compose file: build the image and run the API on :8000.
+# Runtime config (API keys, cache TTL, chain, CAP vars) is read from .env if present.
+# Everything is optional — GoPlus works keyless, so the app runs with no .env at all.
+#
+#   docker compose up --build      # then open http://localhost:8000/ui
+services:
+  token-trust-analyzer:
+    build: .
+    image: token-trust-analyzer
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped

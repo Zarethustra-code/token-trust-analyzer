@@ -1,0 +1,48 @@
+# Keep the build context small and never copy secrets / local state into the image.
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Secrets & local env — NEVER bake these into the image (.env.example is not needed at runtime either)
+.env
+.env.*
+
+# Trained ML artifacts — refit fresh inside the container from data/training_tokens.json
+data/anomaly_model.joblib
+data/supervised_model.joblib
+*.joblib
+*.pkl
+
+# CI / tests / dev-only tooling (tests run in CI, not in the shipped image)
+.github/
+tests/
+scripts/
+requirements-dev.txt
+pytest.ini
+
+# Docs / editor / OS cruft
+*.md
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Docker files themselves (not needed inside the image)
+Dockerfile
+.dockerignore
+docker-compose.yml
