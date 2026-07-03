@@ -377,6 +377,52 @@ simulation backs `POST /cap/analyze`.
 3. `pip install 'croo-sdk==0.2.1'` (already in `requirements.txt`).
 4. `python -m cap.cap_wrapper`.
 
+### A2A composability — a consumer agent hires this one
+
+The real marketplace value is **agent-to-agent (A2A)**: another agent can *hire*
+this analyzer over CAP, pay in USDC on Base, and consume the delivered Trust
+Report with no human in the loop. [`cap/consumer.py`](cap/consumer.py) is that
+**requester** agent — the mirror image of the provider above:
+
+```
+negotiate_order(requirements={contract_address, chain})    # POST
+        │  provider accepts → Order created
+        ▼
+pay_order(order_id)                                        # LOCK  (USDC escrowed on Base)
+        │  provider runs the pipeline → deliver_order
+        ▼
+await ORDER_COMPLETED → get_delivery(order_id)             # DELIVER + CLEAR
+        │
+        ▼  parse the Trust Report JSON → print score / risk / flags
+```
+
+**One-command demo (no keys, no funded wallet):**
+
+```bash
+./scripts/demo_a2a.sh
+# or: python -m cap.consumer 0x6B175474E89094C44Da98b954EedeAC495271d0F
+```
+
+With no `CROO_*` env set it runs in **`[SIMULATION]`** mode: it hires the *local*
+analyzer (`POST /analyze` if a server is up, else the pipeline in-process) and
+narrates the same Post → Lock → Deliver → Clear steps, ending with the Trust
+Report summary — this is what the demo video shows end-to-end without a wallet.
+
+**Live A2A over CROO** (`[LIVE CROO]`, real on-chain settlement) uses two
+identities and a small USDC balance on Base. Run the provider worker
+(`python -m cap.cap_wrapper`), then run the consumer with its **own** key:
+
+```bash
+CONSUMER_CROO_SDK_KEY=croo_sk_<buyer> \
+CROO_SERVICE_ID=<analyzer service id> \
+python -m cap.consumer 0x6B175474E89094C44Da98b954EedeAC495271d0F
+```
+
+The consumer negotiates → pays → waits for delivery → prints the report, logging
+each CAP event (negotiation created → order accepted → paid → delivered →
+completed) as it happens. It signs as `CONSUMER_CROO_SDK_KEY` (falling back to
+`CROO_SDK_KEY`), so the requester is a distinct marketplace identity.
+
 ---
 
 ## Environment variables
@@ -391,6 +437,7 @@ simulation backs `POST /cap/analyze`.
 | `ANTHROPIC_API_KEY` | for `/detect-ai` | Claude API key (AI-content detection). |
 | `ANTHROPIC_MODEL` | — | Defaults to `claude-sonnet-4-6`. |
 | `CROO_SDK_KEY` | for live CAP | SDK key (`croo_sk_...`). Blank → simulation. |
+| `CONSUMER_CROO_SDK_KEY` | for live A2A | Requester identity for `cap/consumer.py`; falls back to `CROO_SDK_KEY`. |
 | `CROO_API_URL` | for live CAP | CROO API base URL. |
 | `CROO_WS_URL` | for live CAP | CROO websocket URL. |
 | `BASE_RPC_URL` | — | Base chain RPC (on-chain reads / settlement). |
@@ -400,6 +447,7 @@ simulation backs `POST /cap/analyze`.
 | `CACHE_MAX_ENTRIES` | — | Max cached tokens before LRU eviction (default `512`). |
 | `BATCH_CONCURRENCY` | — | Max concurrent per-token analyses in `/analyze/batch` (default `5`). |
 | `HOST`, `PORT`, `LOG_LEVEL` | — | Local server config. |
+| `APP_BASE_URL` | — | Where the consumer's simulation POSTs `/analyze` (default `http://localhost:8000`). |
 
 ---
 
