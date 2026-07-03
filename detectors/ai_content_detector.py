@@ -18,6 +18,7 @@ import os
 import re
 from typing import Optional
 
+from detectors.url_fetch import fetch_project_text
 from models.response import AIContentResult
 
 logger = logging.getLogger("token_trust.ai_detector")
@@ -84,6 +85,41 @@ class AIContentDetector:
 
             self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
+
+    def analyze(
+        self,
+        project_text: Optional[str] = None,
+        project_url: Optional[str] = None,
+    ) -> AIContentResult:
+        """Resolve the text source, then run the existing detector on it.
+
+        Precedence (matches the request contract):
+          1. ``project_text`` — used as-is.
+          2. else ``project_url`` — fetched (SSRF-guarded, see ``url_fetch``) and
+             its extracted text is assessed.
+          3. else — behaves exactly as before (``checked = False``).
+
+        The returned result records which ``source`` was analyzed. Detection logic
+        is never duplicated: this only chooses the input text and calls ``detect``.
+        """
+        if project_text and project_text.strip():
+            return self.detect(project_text).model_copy(update={"source": "provided_text"})
+
+        if project_url:
+            fetched = fetch_project_text(project_url)
+            if not fetched:
+                return AIContentResult(
+                    checked=False,
+                    source="fetched_url",
+                    reason=(
+                        "Could not analyze project_url — it was blocked for safety "
+                        "(non-public address or disallowed scheme), was unreachable, "
+                        "or returned no readable text."
+                    ),
+                )
+            return self.detect(fetched).model_copy(update={"source": "fetched_url"})
+
+        return self.detect(None)
 
     def detect(self, project_text: Optional[str]) -> AIContentResult:
         """Assess ``project_text``; returns a graceful, never-raising result."""

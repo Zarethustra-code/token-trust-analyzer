@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -39,6 +40,15 @@ class AnalyzeRequest(BaseModel):
         ),
         max_length=20_000,
     )
+    project_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional http(s) URL to a project page. Used only when project_text "
+            "is absent: the app fetches the page (SSRF-guarded), extracts its text, "
+            "and runs the AI-content detector on that. Ignored if project_text is set."
+        ),
+        max_length=2048,
+    )
 
     @field_validator("contract_address")
     @classmethod
@@ -58,6 +68,23 @@ class AnalyzeRequest(BaseModel):
             raise ValueError(
                 f"chain must be one of: {', '.join(SUPPORTED_CHAINS)} (got {v!r})"
             )
+        return v
+
+    @field_validator("project_url")
+    @classmethod
+    def _valid_url(cls, v: Optional[str]) -> Optional[str]:
+        # Syntactic check only: must be a well-formed http(s) URL. The SSRF safety
+        # check (resolving the host and rejecting private/internal IPs) happens at
+        # fetch time, so a well-formed-but-internal URL degrades to
+        # ``ai_generated_content.checked = False`` rather than a 400.
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        parts = urlsplit(v)
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            raise ValueError("project_url must be a valid http(s) URL")
         return v
 
 

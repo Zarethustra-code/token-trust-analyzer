@@ -84,6 +84,25 @@ def test_analyze_with_mocked_collector(client, monkeypatch, healthy_features):
     assert "data_completeness" in body["score_breakdown"]
 
 
+def test_analyze_with_blocked_project_url(client, monkeypatch, healthy_features):
+    # End-to-end SSRF check through /analyze: a project_url pointing at the cloud
+    # metadata IP is well-formed (200, not a 422), but the fetch is blocked, so
+    # ai_generated_content degrades to checked=False with source 'fetched_url'.
+    # 169.254.169.254 is an IP literal, so getaddrinfo does no network I/O.
+    raw = make_raw_token_data(healthy_features)
+    monkeypatch.setattr(app_module, "OnChainCollector", _fake_collector(raw))
+
+    resp = client.post("/analyze", json={
+        "contract_address": _DAI,
+        "chain": "ethereum",
+        "project_url": "http://169.254.169.254/latest/meta-data/",
+    })
+    assert resp.status_code == 200
+    ai = resp.json()["ai_generated_content"]
+    assert ai["checked"] is False
+    assert ai["source"] == "fetched_url"
+
+
 # --- /detect-ai ------------------------------------------------------------- #
 def test_detect_ai_with_mocked_detector(client, monkeypatch):
     class _FakeDetector:

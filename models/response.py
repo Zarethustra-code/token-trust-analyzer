@@ -129,6 +129,10 @@ class AIContentResult(BaseModel):
     is_ai_generated: Optional[bool] = None
     confidence: Optional[float] = Field(None, description="Detector confidence 0-1, if available.")
     reason: Optional[str] = None
+    source: Optional[str] = Field(
+        None,
+        description="Origin of the analyzed text: 'provided_text', 'fetched_url', or null.",
+    )
 
 
 class DataQuality(BaseModel):

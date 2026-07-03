@@ -139,8 +139,10 @@ def analyze_token(req: AnalyzeRequest) -> TrustReport:
     feature_set = _extractor.extract(raw)
     result = _scorer.score(feature_set)
 
-    # Secondary, optional signal: only runs if project_text was supplied.
-    ai_result = get_detector().detect(req.project_text)
+    # Secondary, optional signal: runs if project_text OR project_url was supplied.
+    ai_result = get_detector().analyze(
+        project_text=req.project_text, project_url=req.project_url
+    )
 
     report = TrustReport(
         contract_address=req.contract_address,
