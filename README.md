@@ -97,7 +97,7 @@ Token Contract Address
 └────────────┬─────────────┘
              ▼
 ┌──────────────────────────┐
-│ 4. AI Content Detector   │   Claude (claude-sonnet-4-6) — optional
+│ 4. AI Content Detector   │   local SLM pipeline (default) / Claude — optional
 └────────────┬─────────────┘
              ▼
 ┌──────────────────────────┐
@@ -117,7 +117,9 @@ token-trust-analyzer/
 │   ├── anomaly_model.py         # Isolation Forest (train + calibrated score)
 │   ├── supervised_model.py      # optional XGBoost (graceful no-op)
 │   └── scorer.py                # blends the three signals + explanation
-├── detectors/ai_content_detector.py  # Claude AI-text detection (optional)
+├── detectors/
+│   ├── ai_content_detector.py   # AI-text detection: backend selection + Claude path
+│   └── local_ai_detector.py     # default backend: offline classifier + SLM reason
 ├── models/{request,response}.py      # Pydantic I/O (Trust Report schema)
 ├── cap/cap_wrapper.py           # CAP integration + local simulation
 └── data/training_tokens.json    # seed feature vectors for the Isolation Forest
@@ -175,7 +177,9 @@ pip install -r requirements.txt
 
 cp .env.example .env
 #   GoPlus works with no key. Add ETHERSCAN_API_KEY + WEB3_RPC_URL for
-#   verified-source/age and on-chain reads. ANTHROPIC_API_KEY only for /detect-ai.
+#   verified-source/age and on-chain reads. AI-content detection defaults to a
+#   local, offline model pipeline — see "AI-content detection" below;
+#   ANTHROPIC_API_KEY is only needed with AI_DETECTOR_BACKEND=anthropic.
 ```
 
 ### Run the API
@@ -244,7 +248,7 @@ ships in the image.
 | `POST` | `/analyze` | Full pipeline: collect → features → score → (AI detect) → report (with a `cached` flag) |
 | `POST` | `/analyze/batch` | Analyze up to 25 tokens in one request (deduped, bounded concurrency, per-token error isolation) |
 | `POST` | `/score` | ML scoring only from a pre-built feature set (**no API keys / network needed**) |
-| `POST` | `/detect-ai` | AI-generated-content detection only (Claude) |
+| `POST` | `/detect-ai` | AI-generated-content detection only (local SLM pipeline by default; see `AI_DETECTOR_BACKEND`) |
 | `POST` | `/cap/analyze` | Run `/analyze` inside a simulated CAP payment cycle |
 | `GET`  | `/health` | Liveness + which data sources are configured |
 
@@ -310,10 +314,73 @@ curl -X POST http://localhost:8000/score -H 'Content-Type: application/json' -d 
 
 ---
 
+## AI-content detection (local by default)
+
+The optional AI-text check (`/detect-ai`, and `/analyze` when `project_text` /
+`project_url` is supplied) is **pluggable** via `AI_DETECTOR_BACKEND`:
+
+| Backend | What runs | Needs |
+| --- | --- | --- |
+| `local` (default) | Offline two-model pipeline: a RoBERTa-style **classifier** decides `is_ai_generated` + `confidence`, then a small instruct **SLM** writes the one–two-sentence `reason`. No API calls, no cost. | `pip install -r requirements-slm.txt` |
+| `anthropic` | The original Claude path (`claude-sonnet-4-6`). | `ANTHROPIC_API_KEY` |
+| `off` | Detection disabled — always `checked: false`. | — |
+
+All backends return the same shape (`checked`, `is_ai_generated`, `confidence`,
+`reason`, `source`); the local backend sets `source` to the models used, e.g.
+`"local:chatgpt-detector-roberta+qwen2.5-1.5b-instruct"`.
+
+### Enabling local mode
+
+```bash
+pip install -r requirements-slm.txt   # transformers + torch (kept OUT of requirements.txt)
+# CPU-only torch is much smaller than the default CUDA build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Notes / caveats:
+
+- **First detection downloads model weights** from the Hugging Face Hub
+  (~0.5 GB classifier + ~3 GB `Qwen/Qwen2.5-1.5B-Instruct`) into
+  `~/.cache/huggingface`; afterwards it is fully offline. Models are
+  **lazy-loaded on first use** — startup stays instant, and the base app deploys
+  fine without the SLM deps installed.
+- **CPU latency:** the classifier verdict is fast (<1 s); the SLM reason takes
+  roughly 5–30 s on CPU depending on hardware. For snappier reasons set
+  `AI_DETECTOR_SLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct`.
+- **Graceful degradation:** if `transformers`/`torch` aren't installed or the
+  classifier can't load, the result is `checked: false` with a clear reason —
+  never a crash. If only the reason-SLM fails, the classifier's verdict is kept
+  with a templated reason (and `source` names just the classifier).
+- The reason is generated with greedy decoding (`do_sample=False`), so it is
+  deterministic for a given text.
+- **Docker:** the default image stays lean and does **not** include the SLM
+  deps or weights. The opt-in is a build arg —
+  `docker build --build-arg INSTALL_SLM=true -t token-trust-analyzer .` —
+  which installs CPU-only torch + `requirements-slm.txt` into the image (see
+  the `Dockerfile`). Mount a Hugging Face cache volume
+  (`-v hf-cache:/home/appuser/.cache/huggingface`) so weights download once,
+  not on every container start.
+
+Live smoke test (not part of CI — it downloads real weights):
+
+```bash
+pip install -r requirements-slm.txt
+AI_DETECTOR_BACKEND=local python app.py &
+curl -X POST http://localhost:8000/detect-ai -H 'Content-Type: application/json' \
+  -d '{"project_text":"Our revolutionary synergistic web3 protocol leverages cutting-edge blockchain technology to empower communities worldwide..."}'
+# → {"checked": true, "is_ai_generated": ..., "confidence": ...,
+#    "reason": "<SLM-written sentence>", "source": "local:chatgpt-detector-roberta+qwen2.5-1.5b-instruct"}
+# No Anthropic call is made; unset ANTHROPIC_API_KEY to prove it.
+```
+
+---
+
 ## Running tests
 
 The suite is **fully offline** — every external call (GoPlus, Etherscan, Web3,
-Anthropic, CROO) is mocked, so it passes on a clean checkout with **no API keys**.
+Anthropic, CROO) is mocked, and the local AI-detector models are monkeypatched
+(no `transformers`/`torch` needed, no weight downloads), so it passes on a clean
+checkout with **no API keys**.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -321,7 +388,8 @@ pytest
 ```
 
 It covers the rules, feature extractor, hybrid scorer (including the
-completeness weighting), the GoPlus/Etherscan collector, the AI-content detector,
+completeness weighting), the GoPlus/Etherscan collector, the AI-content detector
+(the local SLM backend, the Claude path, and `AI_DETECTOR_BACKEND` switching),
 and every HTTP endpoint via `TestClient`. GitHub Actions runs it on Python 3.11
 and 3.12 for every push and pull request (`.github/workflows/tests.yml`).
 
@@ -434,7 +502,10 @@ completed) as it happens. It signs as `CONSUMER_CROO_SDK_KEY` (falling back to
 | `ETHERSCAN_API_KEY` | recommended | Verified-source + contract age (Etherscan V2). |
 | `WEB3_RPC_URL` | recommended | JSON-RPC endpoint (direct ERC-20 reads, `owner()`). |
 | `CHAIN` | — | Default chain (`ethereum` \| `base`). |
-| `ANTHROPIC_API_KEY` | for `/detect-ai` | Claude API key (AI-content detection). |
+| `AI_DETECTOR_BACKEND` | — | AI-content detection backend: `local` (default; offline two-model pipeline) \| `anthropic` (Claude) \| `off`. |
+| `AI_DETECTOR_CLASSIFIER_MODEL` | — | Local classifier (HF id); defaults to `Hello-SimpleAI/chatgpt-detector-roberta`. |
+| `AI_DETECTOR_SLM_MODEL` | — | Local reason-generator (HF id); defaults to `Qwen/Qwen2.5-1.5B-Instruct`. |
+| `ANTHROPIC_API_KEY` | for `anthropic` backend | Claude API key (AI-content detection). |
 | `ANTHROPIC_MODEL` | — | Defaults to `claude-sonnet-4-6`. |
 | `CROO_SDK_KEY` | for live CAP | SDK key (`croo_sk_...`). Blank → simulation. |
 | `CONSUMER_CROO_SDK_KEY` | for live A2A | Requester identity for `cap/consumer.py`; falls back to `CROO_SDK_KEY`. |

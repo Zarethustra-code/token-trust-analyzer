@@ -32,9 +32,22 @@ WORKDIR /app
 # --- dependency layer -------------------------------------------------------
 # Copy only requirements first so that editing app code doesn't invalidate the
 # (slow) pip install layer. Production deps only — requirements-dev.txt is for CI.
-COPY requirements.txt ./
+COPY requirements.txt requirements-slm.txt ./
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
+
+# Optional: local AI-content detection (AI_DETECTOR_BACKEND=local, the default).
+# The deps (transformers + torch) and model weights are multi-GB, so they are
+# deliberately NOT baked into the default image — without them the detector
+# degrades gracefully to checked=false and everything else works. To enable:
+#   docker build --build-arg INSTALL_SLM=true -t token-trust-analyzer .
+# and mount a Hugging Face cache so weights download once, not per container:
+#   docker run -v hf-cache:/home/appuser/.cache/huggingface ...
+ARG INSTALL_SLM=false
+RUN if [ "$INSTALL_SLM" = "true" ]; then \
+        pip install torch --index-url https://download.pytorch.org/whl/cpu \
+        && pip install -r requirements-slm.txt; \
+    fi
 
 # --- application layer ------------------------------------------------------
 # Copy the project. .dockerignore keeps out .env / secrets, the venv, tests, CI,

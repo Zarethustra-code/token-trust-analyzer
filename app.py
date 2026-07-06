@@ -308,8 +308,11 @@ async def health() -> dict:
 
 @app.post("/analyze", response_model=TrustReport)
 async def analyze(req: AnalyzeRequest) -> TrustReport:
+    # Off the event loop (like /analyze/batch): the pipeline is synchronous, and
+    # the default local AI detector may do CPU-bound inference — or a one-time
+    # model download on first use — which must never stall other requests.
     try:
-        return analyze_token(req)
+        return await asyncio.to_thread(analyze_token, req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # pragma: no cover - defensive catch-all
@@ -343,9 +346,11 @@ async def score(req: ScoreRequest) -> TrustReport:
 
 @app.post("/detect-ai", response_model=AIContentResult)
 async def detect_ai(req: DetectAIRequest) -> AIContentResult:
-    """AI-generated-content detection only (Claude). Needs ANTHROPIC_API_KEY."""
+    """AI-generated-content detection only. Backend set by AI_DETECTOR_BACKEND:
+    local SLM pipeline (default), anthropic (needs ANTHROPIC_API_KEY), or off."""
     try:
-        return get_detector().detect(req.project_text)
+        # to_thread for the same reason as /analyze: local inference is CPU-bound.
+        return await asyncio.to_thread(get_detector().detect, req.project_text)
     except Exception as exc:  # pragma: no cover - detector already degrades gracefully
         logger.exception("Unexpected error in /detect-ai")
         raise HTTPException(status_code=500, detail=f"Detection failed: {exc}")

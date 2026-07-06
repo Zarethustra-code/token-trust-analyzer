@@ -1,12 +1,24 @@
-"""AI-generated content detector (secondary / optional).
+"""AI-generated content detector (secondary / optional) — pluggable backends.
 
-If a project's marketing text or whitepaper excerpt is supplied, this asks
-Claude whether the text reads as AI-generated and returns a structured verdict.
-It is deliberately isolated: the on-chain trust pipeline runs fully without it,
-and this module degrades gracefully when no API key (or the ``anthropic`` package)
-is present.
+If a project's marketing text or whitepaper excerpt is supplied, the detector
+judges whether the text reads as AI-generated and returns a structured verdict
+(``AIContentResult``). It is deliberately isolated: the on-chain trust pipeline
+runs fully without it, and every backend degrades gracefully — a missing
+dependency, key, or model never crashes a request.
 
-Per the build spec the model is instructed to emit JSON only, and the reply is
+The backend is selected with ``AI_DETECTOR_BACKEND``:
+
+* ``local`` (default) — a fully offline two-model pipeline (a RoBERTa-style
+  AI-text classifier for the verdict + a small instruct SLM for the prose
+  reason); see ``detectors/local_ai_detector.py``. Needs the optional deps in
+  ``requirements-slm.txt``.
+* ``anthropic`` — the original Claude path below (needs ``ANTHROPIC_API_KEY``).
+* ``off`` — detection always returns ``checked=False``.
+
+All backends share ``BaseAIDetector.analyze`` (text > url source precedence)
+and the same result shape, so ``app.py`` is backend-agnostic.
+
+For the Claude path the model is instructed to emit JSON only, and the reply is
 parsed defensively — we never assume well-formed output.
 """
 
@@ -16,6 +28,7 @@ import json
 import logging
 import os
 import re
+import threading
 from typing import Optional
 
 from detectors.url_fetch import fetch_project_text
@@ -61,7 +74,87 @@ def _extract_json(text: str) -> Optional[dict]:
     return None
 
 
-class AIContentDetector:
+class BaseAIDetector:
+    """Shared contract for detector backends: source resolution + result shape.
+
+    Subclasses implement ``detect`` (and ``available``); ``analyze`` is the
+    single place that decides WHICH text gets assessed, so the precedence rules
+    are never duplicated across backends.
+    """
+
+    @property
+    def available(self) -> bool:  # pragma: no cover - trivially overridden
+        return False
+
+    def detect(self, project_text: Optional[str]) -> AIContentResult:
+        raise NotImplementedError
+
+    def analyze(
+        self,
+        project_text: Optional[str] = None,
+        project_url: Optional[str] = None,
+    ) -> AIContentResult:
+        """Resolve the text source, then run the backend's detector on it.
+
+        Precedence (matches the request contract):
+          1. ``project_text`` — used as-is.
+          2. else ``project_url`` — fetched (SSRF-guarded, see ``url_fetch``) and
+             its extracted text is assessed.
+          3. else — behaves exactly as before (``checked = False``).
+
+        ``source`` records the backend/models used when ``detect`` sets it (the
+        local pipeline does, e.g. ``"local:<classifier>+<slm>"``); otherwise it
+        falls back to the origin of the analyzed text. Detection logic is never
+        duplicated: this only chooses the input text and calls ``detect``.
+        """
+        if project_text and project_text.strip():
+            result = self.detect(project_text)
+            if result.source:
+                return result
+            return result.model_copy(update={"source": "provided_text"})
+
+        if project_url:
+            fetched = fetch_project_text(project_url)
+            if not fetched:
+                return AIContentResult(
+                    checked=False,
+                    source="fetched_url",
+                    reason=(
+                        "Could not analyze project_url — it was blocked for safety "
+                        "(non-public address or disallowed scheme), was unreachable, "
+                        "or returned no readable text."
+                    ),
+                )
+            result = self.detect(fetched)
+            if result.source:
+                return result
+            return result.model_copy(update={"source": "fetched_url"})
+
+        return self.detect(None)
+
+
+class OffDetector(BaseAIDetector):
+    """``AI_DETECTOR_BACKEND=off`` — detection is disabled, always unchecked."""
+
+    _REASON = "AI-content detection is disabled (AI_DETECTOR_BACKEND=off)."
+
+    @property
+    def available(self) -> bool:
+        return False
+
+    def analyze(
+        self,
+        project_text: Optional[str] = None,
+        project_url: Optional[str] = None,
+    ) -> AIContentResult:
+        # Skip even the URL fetch: no point doing network work for a disabled check.
+        return AIContentResult(checked=False, reason=self._REASON)
+
+    def detect(self, project_text: Optional[str]) -> AIContentResult:
+        return AIContentResult(checked=False, reason=self._REASON)
+
+
+class AIContentDetector(BaseAIDetector):
     """Thin wrapper around the Anthropic Messages API for AI-text detection."""
 
     def __init__(
@@ -85,41 +178,6 @@ class AIContentDetector:
 
             self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
-
-    def analyze(
-        self,
-        project_text: Optional[str] = None,
-        project_url: Optional[str] = None,
-    ) -> AIContentResult:
-        """Resolve the text source, then run the existing detector on it.
-
-        Precedence (matches the request contract):
-          1. ``project_text`` — used as-is.
-          2. else ``project_url`` — fetched (SSRF-guarded, see ``url_fetch``) and
-             its extracted text is assessed.
-          3. else — behaves exactly as before (``checked = False``).
-
-        The returned result records which ``source`` was analyzed. Detection logic
-        is never duplicated: this only chooses the input text and calls ``detect``.
-        """
-        if project_text and project_text.strip():
-            return self.detect(project_text).model_copy(update={"source": "provided_text"})
-
-        if project_url:
-            fetched = fetch_project_text(project_url)
-            if not fetched:
-                return AIContentResult(
-                    checked=False,
-                    source="fetched_url",
-                    reason=(
-                        "Could not analyze project_url — it was blocked for safety "
-                        "(non-public address or disallowed scheme), was unreachable, "
-                        "or returned no readable text."
-                    ),
-                )
-            return self.detect(fetched).model_copy(update={"source": "fetched_url"})
-
-        return self.detect(None)
 
     def detect(self, project_text: Optional[str]) -> AIContentResult:
         """Assess ``project_text``; returns a graceful, never-raising result."""
@@ -181,11 +239,48 @@ class AIContentDetector:
         )
 
 
-_DETECTOR: Optional[AIContentDetector] = None
+VALID_BACKENDS = ("local", "anthropic", "off")
+DEFAULT_BACKEND = "local"
+
+# One cached instance per backend, so flipping AI_DETECTOR_BACKEND at runtime
+# (tests do) picks the right detector without re-creating it on every request.
+# The lock matters for the local backend: concurrent first requests (e.g. a
+# /analyze/batch fan-out) must share ONE LocalAIDetector, or each would lazily
+# load its own multi-GB model pipelines.
+_DETECTORS: dict[str, BaseAIDetector] = {}
+_DETECTORS_LOCK = threading.Lock()
 
 
-def get_detector() -> AIContentDetector:
-    global _DETECTOR
-    if _DETECTOR is None:
-        _DETECTOR = AIContentDetector()
-    return _DETECTOR
+def get_backend() -> str:
+    """Resolve AI_DETECTOR_BACKEND, falling back to the default on junk values."""
+    backend = (os.getenv("AI_DETECTOR_BACKEND") or DEFAULT_BACKEND).strip().lower()
+    if backend not in VALID_BACKENDS:
+        logger.warning(
+            "Unknown AI_DETECTOR_BACKEND=%r; using %r. Valid values: %s",
+            backend,
+            DEFAULT_BACKEND,
+            ", ".join(VALID_BACKENDS),
+        )
+        backend = DEFAULT_BACKEND
+    return backend
+
+
+def get_detector() -> BaseAIDetector:
+    backend = get_backend()
+    detector = _DETECTORS.get(backend)
+    if detector is None:
+        with _DETECTORS_LOCK:
+            detector = _DETECTORS.get(backend)
+            if detector is None:
+                if backend == "anthropic":
+                    detector = AIContentDetector()
+                elif backend == "off":
+                    detector = OffDetector()
+                else:
+                    # Imported lazily: the local backend's module stays out of the
+                    # hot import path; heavy deps load only on first detect().
+                    from detectors.local_ai_detector import LocalAIDetector
+
+                    detector = LocalAIDetector()
+                _DETECTORS[backend] = detector
+    return detector

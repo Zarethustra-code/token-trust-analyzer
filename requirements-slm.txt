@@ -1,0 +1,20 @@
+# --- Optional: local AI-content detection (AI_DETECTOR_BACKEND=local) --------
+#
+# Deliberately kept OUT of requirements.txt: the base app must stay lightweight
+# and deployable without multi-GB downloads. Install these only if you want the
+# offline two-model detector (detectors/local_ai_detector.py):
+#
+#   pip install -r requirements-slm.txt
+#
+# Notes:
+# * torch from PyPI ships the CUDA build (~2+ GB). For a CPU-only install:
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   then `pip install -r requirements-slm.txt` (torch will be satisfied).
+# * The first detection downloads model weights from the Hugging Face Hub
+#   (~0.5 GB for the RoBERTa classifier + ~3 GB for Qwen2.5-1.5B-Instruct) and
+#   caches them under ~/.cache/huggingface. Later runs are fully offline.
+# * accelerate is NOT required for the default CPU pipelines; add it only if you
+#   want device_map="auto" style GPU placement.
+
+transformers>=4.44,<5.0
+torch>=2.2,<3.0
