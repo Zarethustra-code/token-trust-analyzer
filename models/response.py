@@ -166,6 +166,15 @@ class TrustReport(BaseModel):
     data_quality: DataQuality = Field(default_factory=DataQuality)
 
     explanation: str = Field(..., description="Plain-language justification for the score.")
+    narrative: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional analyst-style risk summary (2–4 sentences) written by the "
+            "local SLM, phrasing the deterministic signals. Null when disabled "
+            "(RISK_NARRATIVE=off) or the SLM is unavailable; the scores, flags and "
+            "explanation are always produced deterministically regardless."
+        ),
+    )
     generated_at: Optional[str] = Field(
         None, description="ISO-8601 UTC timestamp of when the report was produced."
     )

@@ -279,8 +279,11 @@ def get_detector() -> BaseAIDetector:
                 else:
                     # Imported lazily: the local backend's module stays out of the
                     # hot import path; heavy deps load only on first detect().
-                    from detectors.local_ai_detector import LocalAIDetector
+                    # Use the PROCESS-WIDE shared instance so the local SLM is
+                    # loaded at most once across the detector and the risk-narrative
+                    # writer (ml.narrative), never a second copy.
+                    from detectors.local_ai_detector import get_shared_local_detector
 
-                    detector = LocalAIDetector()
+                    detector = get_shared_local_detector()
                 _DETECTORS[backend] = detector
     return detector

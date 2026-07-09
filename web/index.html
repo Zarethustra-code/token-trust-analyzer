@@ -225,6 +225,11 @@
       <p class="explain" id="explain"></p>
     </div>
 
+    <div class="card" id="narrcard" style="display:none">
+      <p class="sect-title">Analyst summary</p>
+      <p class="explain" id="narrative"></p>
+    </div>
+
     <details class="block">
       <summary>Score breakdown (explainable ML)</summary>
       <div class="body">
@@ -357,6 +362,12 @@
 
     // explanation
     $("explain").textContent = r.explanation || "";
+
+    // analyst summary (SLM narrative) — shown only when the SLM produced one
+    const narr = (r.narrative || "").trim();
+    const narrCard = $("narrcard");
+    if (narr) { $("narrative").textContent = narr; narrCard.style.display = ""; }
+    else { $("narrative").textContent = ""; narrCard.style.display = "none"; }
 
     // breakdown
     const pen = $("penalties"); clear(pen);

@@ -49,6 +49,14 @@ class AnalyzeRequest(BaseModel):
         ),
         max_length=2048,
     )
+    include_narrative: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Per-request override for the SLM-written analyst risk narrative: true "
+            "forces it on, false forces it off, null (default) follows the "
+            "RISK_NARRATIVE env var. CPU generation adds seconds of latency."
+        ),
+    )
 
     @field_validator("contract_address")
     @classmethod

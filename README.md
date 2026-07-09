@@ -275,7 +275,8 @@ to respect the upstream rate limits.
 // request
 { "contract_address": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
   "chain": "ethereum",            // ethereum | base (optional, default ethereum)
-  "project_text": "optional marketing text for AI detection" }
+  "project_text": "optional marketing text for AI detection",
+  "include_narrative": true }     // optional; overrides RISK_NARRATIVE for this request
 ```
 
 ```jsonc
@@ -290,6 +291,7 @@ to respect the upstream rate limits.
   "ai_generated_content": { "checked": false, "reason": "No project text ..." },
   "data_quality": { "sources_used": ["goplus","etherscan","web3"], "missing_fields": [...] },
   "explanation": "Risk score 12/100 (LOW). ...",
+  "narrative": null,              // analyst summary — populated only when enabled (see below)
   "generated_at": "..." }
 ```
 
@@ -372,6 +374,54 @@ curl -X POST http://localhost:8000/detect-ai -H 'Content-Type: application/json'
 #    "reason": "<SLM-written sentence>", "source": "local:chatgpt-detector-roberta+qwen2.5-1.5b-instruct"}
 # No Anthropic call is made; unset ANTHROPIC_API_KEY to prove it.
 ```
+
+## Analyst risk narrative (SLM-written, opt-in)
+
+Every Trust Report carries a templated `explanation` ("Risk score 40/100 … rules
+fired …"). Optionally it can *also* carry a **`narrative`**: a short (2–4 sentence)
+analyst-style paragraph that connects the signals the way a human would —
+_"Although liquidity is locked and ownership renounced, the elevated top-10
+concentration combined with the contract's young age keeps this token in
+medium-risk territory."_
+
+- **The SLM only writes the prose — it never decides.** `trust_score`,
+  `risk_level`, `flags`, `score_breakdown` and `explanation` are produced by the
+  deterministic pipeline exactly as before. The narrative is an **additive**,
+  nullable field.
+- **Generated fully locally**, reusing the **same** lazily-loaded SLM as the local
+  AI-content detector (`AI_DETECTOR_SLM_MODEL`) — no second model copy, and **no
+  external API call**.
+- **Grounded / anti-hallucination:** the prompt is built from a facts block only
+  (score, risk level, confidence, each fired rule + points, the anomaly signal, a
+  handful of notable metrics — nulls passed as "unknown"), the model is told to
+  use only those facts and not invent numbers or advice, decoding is
+  deterministic (greedy, ≤ 200 new tokens), and the output must pass sanity bounds
+  (empty / < 30 / > 900 chars → dropped). On any failure the `narrative` is simply
+  `null` and the deterministic `explanation` stands alone.
+
+### Enabling it
+
+Gated because CPU generation costs seconds:
+
+```bash
+pip install -r requirements-slm.txt      # same deps as the local detector
+RISK_NARRATIVE=on python app.py          # off (default) | on
+```
+
+Per request, `include_narrative` overrides the env var (`true`/`false` force it
+on/off; omit or `null` to follow `RISK_NARRATIVE`):
+
+```bash
+curl -X POST http://localhost:8000/analyze -H 'Content-Type: application/json' \
+  -d '{"contract_address":"0x6B175474E89094C44Da98b954EedeAC495271d0F",
+       "include_narrative":true}'
+# → the Trust Report now includes a coherent, locally-generated "narrative".
+```
+
+Both `/analyze` and `/cap/analyze` (the CROO-delivered paid product) honor the
+gate. **`/analyze/batch` inherits it too** — enabling narratives on a batch
+multiplies the per-token CPU latency, so leave `RISK_NARRATIVE=off` for large
+batches. **`/score` never generates a narrative** (pure-ML endpoint, kept fast).
 
 ---
 
@@ -504,7 +554,8 @@ completed) as it happens. It signs as `CONSUMER_CROO_SDK_KEY` (falling back to
 | `CHAIN` | — | Default chain (`ethereum` \| `base`). |
 | `AI_DETECTOR_BACKEND` | — | AI-content detection backend: `local` (default; offline two-model pipeline) \| `anthropic` (Claude) \| `off`. |
 | `AI_DETECTOR_CLASSIFIER_MODEL` | — | Local classifier (HF id); defaults to `Hello-SimpleAI/chatgpt-detector-roberta`. |
-| `AI_DETECTOR_SLM_MODEL` | — | Local reason-generator (HF id); defaults to `Qwen/Qwen2.5-1.5B-Instruct`. |
+| `AI_DETECTOR_SLM_MODEL` | — | Local reason-generator (HF id); also writes the risk narrative (one shared model); defaults to `Qwen/Qwen2.5-1.5B-Instruct`. |
+| `RISK_NARRATIVE` | — | Analyst risk narrative in the Trust Report: `off` (default) \| `on`. CPU generation adds seconds; per-request `include_narrative` overrides it. Needs `requirements-slm.txt`. |
 | `ANTHROPIC_API_KEY` | for `anthropic` backend | Claude API key (AI-content detection). |
 | `ANTHROPIC_MODEL` | — | Defaults to `claude-sonnet-4-6`. |
 | `CROO_SDK_KEY` | for live CAP | SDK key (`croo_sk_...`). Blank → simulation. |

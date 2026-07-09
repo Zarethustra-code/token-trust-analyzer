@@ -28,6 +28,7 @@ from collectors.onchain_collector import OnChainCollector
 from detectors.ai_content_detector import get_detector
 from features.feature_extractor import FEATURE_ORDER, FeatureExtractor
 from ml.anomaly_model import get_anomaly_model
+from ml.narrative import generate_narrative
 from ml.scorer import TrustScorer
 from models.request import (
     SUPPORTED_CHAINS,
@@ -90,6 +91,19 @@ _BOOLEAN_METRIC_FIELDS = {
     "hidden_owner", "can_take_back_ownership", "is_anti_whale",
 }
 _INT_METRIC_FIELDS = {"holder_count", "recent_tx_count"}
+
+_NARRATIVE_TRUE = {"on", "true", "1", "yes"}
+
+
+def _narrative_enabled(override: Optional[bool]) -> bool:
+    """Whether to generate the SLM risk narrative for this request.
+
+    A per-request ``include_narrative`` (True/False) wins; ``None`` follows the
+    ``RISK_NARRATIVE`` env var (default ``off`` — CPU generation costs seconds).
+    """
+    if override is not None:
+        return override
+    return os.getenv("RISK_NARRATIVE", "off").strip().lower() in _NARRATIVE_TRUE
 
 
 def _now_iso() -> str:
@@ -163,6 +177,19 @@ def analyze_token(req: AnalyzeRequest) -> TrustReport:
         generated_at=_now_iso(),
         cached=was_cached,
     )
+
+    # Optional analyst-style narrative: prose only, phrasing the deterministic
+    # signals above (score/flags/explanation stay exactly as produced). Gated
+    # because CPU inference on the local SLM costs seconds. Runs here so BOTH
+    # /analyze and /cap/analyze (and the batch endpoint, via analyze_token) get
+    # it. On any failure while requested we keep the report and note it.
+    if _narrative_enabled(req.include_narrative):
+        narrative = generate_narrative(report)
+        if narrative:
+            report.narrative = narrative
+        else:
+            report.data_quality.notes.append("narrative unavailable")
+
     return report
 
 

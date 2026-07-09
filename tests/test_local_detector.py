@@ -24,10 +24,17 @@ def _boom(*_a, **_k):
 
 @pytest.fixture(autouse=True)
 def _fresh_detector_cache():
-    """Isolate the per-backend detector cache so env flips in one test don't leak."""
+    """Isolate the per-backend detector cache so env flips in one test don't leak.
+
+    Also drops the process-wide shared LocalAIDetector: ``get_detector()`` for the
+    ``local`` backend now returns that shared instance, so a load/error cached on
+    it by one test must not leak into the next.
+    """
     det_mod._DETECTORS.clear()
+    local_mod.reset_shared_local_detector()
     yield
     det_mod._DETECTORS.clear()
+    local_mod.reset_shared_local_detector()
 
 
 def _fake_classifier(label: str, score: float, seen: dict | None = None):

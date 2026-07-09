@@ -267,34 +267,82 @@ class LocalAIDetector(BaseAIDetector):
             source=source,
         )
 
+    def generate_text(
+        self, prompt: str, *, max_new_tokens: int = _MAX_REASON_TOKENS
+    ) -> Optional[str]:
+        """Deterministic (greedy) generation via the shared reason SLM.
+
+        This is the single seam every consumer of the local generative model goes
+        through — the AI-content reason generator *and* the risk-narrative writer
+        (``ml.narrative``). Because they all call this on the one lazily-loaded
+        pipeline, a second copy of the model is never loaded. Greedy decoding
+        (``do_sample=False``) is temperature≈0, so output is stable across runs.
+
+        Best-effort and never-raising: returns ``None`` when the SLM is
+        unavailable (deps/weights missing) or generation fails, so callers can
+        fall back gracefully. Inference is serialized on ``_infer_lock`` (the fast
+        tokenizer's state is not concurrency-safe, and CPU inference gains nothing
+        from parallel threads).
+        """
+        slm = self._get_slm()
+        if slm is None:
+            return None
+        try:
+            with self._infer_lock:
+                output = slm(
+                    [{"role": "user", "content": prompt}],
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,  # greedy -> deterministic
+                    return_full_text=False,
+                )
+            return _extract_generated_text(output)
+        except Exception as exc:
+            logger.warning("Local SLM generation failed: %s", exc)
+            return None
+
     def _build_reason(self, text: str, is_ai: bool, confidence: float) -> tuple[str, bool]:
         """One–two sentence justification; (reason, whether the SLM produced it)."""
         verdict = "AI-generated" if is_ai else "human-written"
-        slm = self._get_slm()
-        if slm is not None:
-            prompt = (
-                "A specialized classifier judged the following crypto-project text "
-                f"to be {verdict} (confidence {confidence:.2f}). In one or two short "
-                "sentences, explain what about the writing style supports that "
-                "verdict. Reply with the explanation only.\n\n"
-                f"<text>\n{text[:_REASON_EXCERPT_CAP]}\n</text>"
-            )
-            try:
-                with self._infer_lock:
-                    output = slm(
-                        [{"role": "user", "content": prompt}],
-                        max_new_tokens=_MAX_REASON_TOKENS,
-                        do_sample=False,  # greedy -> deterministic reason
-                        return_full_text=False,
-                    )
-                reply = _extract_generated_text(output)
-                if reply:
-                    return reply[:_MAX_REASON_CHARS], True
-                logger.warning("Local reason SLM returned no usable text.")
-            except Exception as exc:
-                logger.warning("Local reason generation failed: %s", exc)
+        prompt = (
+            "A specialized classifier judged the following crypto-project text "
+            f"to be {verdict} (confidence {confidence:.2f}). In one or two short "
+            "sentences, explain what about the writing style supports that "
+            "verdict. Reply with the explanation only.\n\n"
+            f"<text>\n{text[:_REASON_EXCERPT_CAP]}\n</text>"
+        )
+        reply = self.generate_text(prompt, max_new_tokens=_MAX_REASON_TOKENS)
+        if reply:
+            return reply[:_MAX_REASON_CHARS], True
         return (
             f"Local classifier judged the text {verdict} "
             f"(confidence {confidence:.2f}); no SLM explanation available.",
             False,
         )
+
+
+# --- process-wide shared instance ------------------------------------------- #
+# One canonical LocalAIDetector for the whole process. Both the AI-content
+# detector factory (``ai_content_detector.get_detector`` for the ``local``
+# backend) and the risk-narrative writer (``ml.narrative``) obtain the SLM
+# through this, so the model is lazily loaded AT MOST ONCE regardless of how many
+# features use it — the narrative can run even when AI_DETECTOR_BACKEND != local,
+# and never at the cost of a second multi-GB model copy.
+_SHARED_DETECTOR: Optional[LocalAIDetector] = None
+_SHARED_LOCK = threading.Lock()
+
+
+def get_shared_local_detector() -> LocalAIDetector:
+    """Return the process-wide :class:`LocalAIDetector` (created on first use)."""
+    global _SHARED_DETECTOR
+    if _SHARED_DETECTOR is None:
+        with _SHARED_LOCK:
+            if _SHARED_DETECTOR is None:
+                _SHARED_DETECTOR = LocalAIDetector()
+    return _SHARED_DETECTOR
+
+
+def reset_shared_local_detector() -> None:
+    """Drop the shared instance (tests only, so a fresh one loads next time)."""
+    global _SHARED_DETECTOR
+    with _SHARED_LOCK:
+        _SHARED_DETECTOR = None
