@@ -2,8 +2,14 @@
 
 An explainable AI agent that scores the **trustworthiness of an ERC-20 token**.
 Give it a contract address; it returns a structured **Trust Report** — a 0–100
-risk score, a LOW/MEDIUM/HIGH level, human-readable flags, key metrics, and a
-plain-language explanation of *why* the score is what it is.
+risk score, an **INCONCLUSIVE / LOW / MEDIUM / HIGH** level, human-readable flags,
+key metrics, and a plain-language explanation of *why* the score is what it is.
+
+> **INCONCLUSIVE** means the analyzer did not have enough reliable on-chain data
+> to classify the token; a low score there would reflect **missing data, not
+> verified safety**. It is returned only when very little data could be observed
+> *and* no risk rule fired — a confirmed risk (e.g. a honeypot) is hard evidence
+> and always surfaces with its real LOW/MEDIUM/HIGH level.
 
 Built for the **CROO AI Agent Hackathon**. It is deployed on the **CROO Agent
 Protocol (CAP)** as a paid, composable agent that settles on-chain.

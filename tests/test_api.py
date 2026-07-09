@@ -20,7 +20,17 @@ def _fake_collector(raw: dict):
     return _FakeCollector
 
 
-# --- /ui -------------------------------------------------------------------- #
+# --- / and /ui -------------------------------------------------------------- #
+def test_root_redirects_to_ui(client):
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code in (302, 307, 308)
+    assert resp.headers["location"] == "/ui"
+    # following it lands on the dashboard
+    followed = client.get("/")
+    assert followed.status_code == 200
+    assert "Token Trust Analyzer" in followed.text
+
+
 def test_ui_serves_html(client):
     resp = client.get("/ui")
     assert resp.status_code == 200

@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field
 
 
 class RiskLevel(str, Enum):
+    # INCONCLUSIVE is a distinct verdict, not a score band: it means too little
+    # on-chain data was observable to classify the token. It is never returned by
+    # from_score (which only maps a numeric score) — the scorer selects it
+    # explicitly when the data is too sparse and no rule fired.
+    INCONCLUSIVE = "INCONCLUSIVE"
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"

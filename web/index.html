@@ -108,6 +108,10 @@
   .bar { height: 8px; border-radius: 999px; background: #0c111a; border: 1px solid var(--border); margin-top: 8px; overflow: hidden; max-width: 320px; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
 
+  .notice { margin-top: 16px; padding: 12px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5;
+    color: var(--text); background: color-mix(in srgb, var(--muted) 14%, transparent);
+    border: 1px solid var(--muted); }
+
   .sect-title { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 0 0 12px; }
 
   .flags { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -208,6 +212,11 @@
           <div class="bar"><i id="confbar" style="width:0%"></i></div>
         </div>
       </div>
+
+      <div class="notice" id="inconclusive-notice" style="display:none">
+        ⚠ Insufficient data to classify this token. A low score here reflects
+        <b>missing data, not verified safety</b> — do not treat it as safe.
+      </div>
     </div>
 
     <div class="card">
@@ -265,7 +274,7 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const RISK = { LOW: "var(--green)", MEDIUM: "var(--amber)", HIGH: "var(--red)" };
+  const RISK = { INCONCLUSIVE: "var(--muted)", LOW: "var(--green)", MEDIUM: "var(--amber)", HIGH: "var(--red)" };
   const ADDR_RE = /^0x[a-fA-F0-9]{40}$/;
 
   // --- formatting helpers ---
@@ -303,11 +312,19 @@
   arc.style.strokeDasharray = arcLen;
   arc.style.strokeDashoffset = arcLen;
   function setGauge(score, risk) {
-    const s = Math.max(0, Math.min(100, Number(score) || 0));
     const color = RISK[risk] || "var(--accent)";
     arc.style.stroke = color;
-    arc.style.strokeDashoffset = arcLen * (1 - s / 100);
     arc.style.transition = "stroke-dashoffset .8s ease, stroke .3s";
+    if (risk === "INCONCLUSIVE") {
+      // No reliable score to plot: show an empty, neutral ring and a dash so a
+      // data-starved token never *looks* like a low/safe result.
+      arc.style.strokeDashoffset = arcLen;
+      $("score").textContent = "—";
+      $("score").style.color = color;
+      return;
+    }
+    const s = Math.max(0, Math.min(100, Number(score) || 0));
+    arc.style.strokeDashoffset = arcLen * (1 - s / 100);
     $("score").textContent = s;
     $("score").style.color = color;
   }
@@ -329,6 +346,9 @@
     badge.style.color = RISK[risk] || "var(--text)";
     badge.style.background = "color-mix(in srgb, " + (RISK[risk] || "var(--accent)") + " 16%, transparent)";
     badge.style.border = "1px solid " + (RISK[risk] || "var(--accent)");
+
+    // Prominent "insufficient data" banner — only for INCONCLUSIVE.
+    $("inconclusive-notice").style.display = (risk === "INCONCLUSIVE") ? "" : "none";
 
     const bd = r.score_breakdown || {};
     const comp = isNil(bd.data_completeness) ? null : Math.round(bd.data_completeness * 100);

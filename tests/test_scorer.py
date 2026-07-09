@@ -54,6 +54,45 @@ def test_scam_is_high(scam_features):
     assert res.trust_score == 100  # rules alone clear the clamp
 
 
+# --- INCONCLUSIVE guard: data-starved with no rule fired -------------------- #
+def test_data_starved_no_rule_is_inconclusive():
+    fs = FeatureExtractor().extract({})  # nothing observed -> everything imputed
+    res = _scorer(0.0).score(fs)
+    assert res.breakdown.data_completeness < 0.4
+    assert res.risk_level is RiskLevel.INCONCLUSIVE
+    expl = res.explanation.lower()
+    assert "inconclusive" in expl
+    assert "missing data" in expl  # a low score here reflects missing data, not safety
+    assert not res.flags
+
+
+def test_fired_rule_overrides_inconclusive_guard():
+    # Same data-starved profile, but a honeypot is *confirmed* — hard evidence,
+    # so the verdict must not be hidden behind INCONCLUSIVE.
+    fs = FeatureExtractor().extract({"is_honeypot": 1})
+    res = _scorer(0.0).score(fs)
+    assert res.breakdown.data_completeness < 0.4  # still data-starved
+    assert res.risk_level is not RiskLevel.INCONCLUSIVE
+    assert any("honeypot" in f.lower() for f in res.flags)  # the flag surfaces
+
+
+def test_full_data_healthy_stays_low(healthy_features):
+    fs = FeatureExtractor().extract(healthy_features)  # 0 imputed -> complete
+    res = _scorer(0.0).score(fs)
+    assert res.breakdown.data_completeness == 1.0
+    assert res.risk_level is RiskLevel.LOW
+
+
+def test_low_completeness_boundary_is_not_inconclusive(healthy_features):
+    # completeness exactly at the 0.4 threshold (12/20 imputed) is NOT below it,
+    # so a clean profile there is still classified normally (LOW), not withheld.
+    base = FeatureExtractor().extract(healthy_features)
+    fs = _with_imputed(base, FEATURE_ORDER[:12])  # completeness == 0.4
+    res = _scorer(0.0).score(fs)
+    assert res.breakdown.data_completeness == 0.4
+    assert res.risk_level is RiskLevel.LOW
+
+
 # --- completeness weighting (the new behavior) ------------------------------ #
 def test_completeness_down_weights_anomaly(healthy_features):
     base = FeatureExtractor().extract(healthy_features)

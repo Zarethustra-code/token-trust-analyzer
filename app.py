@@ -20,7 +20,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
 from cap.cap_wrapper import simulate_cap_cycle
@@ -304,6 +304,12 @@ app = FastAPI(
 
 
 _WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Land on the web dashboard; API docs stay at /docs, endpoints unchanged."""
+    return RedirectResponse(url="/ui")
 
 
 @app.get("/ui", include_in_schema=False)

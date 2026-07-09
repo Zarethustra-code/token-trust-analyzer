@@ -38,6 +38,10 @@ W_SUPERVISED = 0.35
 # floor — even a sparse profile carries *some* anomaly signal.
 ANOMALY_COMPLETENESS_FLOOR = 0.35
 
+# Below this completeness AND with no rule fired, we have observed too little
+# to classify — verdict is INCONCLUSIVE, never a misleading "LOW risk".
+INCONCLUSIVE_COMPLETENESS = 0.4
+
 
 def _confidence_label(completeness: float) -> str:
     """Map data completeness (0..1) to a confidence band."""
@@ -102,7 +106,15 @@ class TrustScorer:
 
         raw_total = rule_total + anomaly_contribution + supervised_contribution
         final = int(round(max(0.0, min(100.0, raw_total))))
-        risk_level = RiskLevel.from_score(final)
+
+        # A data-starved token with no rule fired must not be labelled "LOW risk":
+        # a low score there reflects missing data, not verified safety. A fired
+        # rule is hard, directly-observed evidence, so it overrides the guard and
+        # honeypots etc. still surface with their real level.
+        if data_completeness < INCONCLUSIVE_COMPLETENESS and not fired:
+            risk_level = RiskLevel.INCONCLUSIVE
+        else:
+            risk_level = RiskLevel.from_score(final)
 
         breakdown = ScoreBreakdown(
             rule_penalties=rule_penalties,
@@ -144,9 +156,16 @@ class TrustScorer:
         data_completeness: float,
         confidence: str,
     ) -> str:
-        parts: list[str] = [
-            f"Risk score {final}/100 ({level.value}). Higher means riskier."
-        ]
+        if level == RiskLevel.INCONCLUSIVE:
+            parts: list[str] = [
+                f"INCONCLUSIVE: only {data_completeness * 100:.0f}% of the expected "
+                "on-chain data could be observed and no risk rule was triggered, so "
+                "there is not enough reliable information to classify this token. A "
+                "low score here reflects missing data, not verified safety — do not "
+                "treat this token as safe."
+            ]
+        else:
+            parts = [f"Risk score {final}/100 ({level.value}). Higher means riskier."]
         if fired:
             top = sorted(fired, key=lambda r: r.points, reverse=True)
             drivers = "; ".join(f"{r.flag} (+{r.points:g})" for r in top)
